@@ -1,0 +1,667 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+<!-- 2026-09-03 Thu 11:13 -->
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>本地语音转文字 FunASR on llama.cpp</title>
+<meta name="author" content="van" />
+<meta name="generator" content="Org Mode" />
+<style type="text/css">
+  #content { max-width: 60em; margin: auto; }
+  .title  { text-align: center;
+             margin-bottom: .2em; }
+  .subtitle { text-align: center;
+              font-size: medium;
+              font-weight: bold;
+              margin-top:0; }
+  .todo   { font-family: monospace; color: red; }
+  .done   { font-family: monospace; color: green; }
+  .priority { font-family: monospace; color: orange; }
+  .tag    { background-color: #eee; font-family: monospace;
+            padding: 2px; font-size: 80%; font-weight: normal; }
+  .timestamp { color: #bebebe; }
+  .timestamp-kwd { color: #5f9ea0; }
+  .org-right  { margin-left: auto; margin-right: 0px;  text-align: right; }
+  .org-left   { margin-left: 0px;  margin-right: auto; text-align: left; }
+  .org-center { margin-left: auto; margin-right: auto; text-align: center; }
+  .underline { text-decoration: underline; }
+  #postamble p, #preamble p { font-size: 90%; margin: .2em; }
+  p.verse { margin-left: 3%; }
+  pre {
+    border: 1px solid #e6e6e6;
+    border-radius: 3px;
+    background-color: #f2f2f2;
+    padding: 8pt;
+    font-family: monospace;
+    overflow: auto;
+    margin: 1.2em;
+  }
+  pre.src {
+    position: relative;
+    overflow: auto;
+  }
+  pre.src:before {
+    display: none;
+    position: absolute;
+    top: -8px;
+    right: 12px;
+    padding: 3px;
+    color: #555;
+    background-color: #f2f2f299;
+  }
+  pre.src:hover:before { display: inline; margin-top: 14px;}
+  /* Languages per Org manual */
+  pre.src-asymptote:before { content: 'Asymptote'; }
+  pre.src-awk:before { content: 'Awk'; }
+  pre.src-authinfo::before { content: 'Authinfo'; }
+  pre.src-c:before { content: 'C'; }
+  pre.src-C:before { content: 'C'; }
+  /* pre.src-C++ doesn't work in CSS */
+  pre.src-clojure:before { content: 'Clojure'; }
+  pre.src-css:before { content: 'CSS'; }
+  pre.src-D:before { content: 'D'; }
+  pre.src-ditaa:before { content: 'ditaa'; }
+  pre.src-dot:before { content: 'Graphviz'; }
+  pre.src-calc:before { content: 'Emacs Calc'; }
+  pre.src-emacs-lisp:before { content: 'Emacs Lisp'; }
+  pre.src-fortran:before { content: 'Fortran'; }
+  pre.src-gnuplot:before { content: 'gnuplot'; }
+  pre.src-haskell:before { content: 'Haskell'; }
+  pre.src-hledger:before { content: 'hledger'; }
+  pre.src-java:before { content: 'Java'; }
+  pre.src-js:before { content: 'JavaScript'; }
+  pre.src-latex:before { content: 'LaTeX'; }
+  pre.src-ledger:before { content: 'Ledger'; }
+  pre.src-lisp:before { content: 'Lisp'; }
+  pre.src-lilypond:before { content: 'Lilypond'; }
+  pre.src-lua:before { content: 'Lua'; }
+  pre.src-matlab:before { content: 'MATLAB'; }
+  pre.src-mscgen:before { content: 'Mscgen'; }
+  pre.src-ocaml:before { content: 'Objective Caml'; }
+  pre.src-octave:before { content: 'Octave'; }
+  pre.src-org:before { content: 'Org mode'; }
+  pre.src-oz:before { content: 'OZ'; }
+  pre.src-plantuml:before { content: 'Plantuml'; }
+  pre.src-processing:before { content: 'Processing.js'; }
+  pre.src-python:before { content: 'Python'; }
+  pre.src-R:before { content: 'R'; }
+  pre.src-ruby:before { content: 'Ruby'; }
+  pre.src-sass:before { content: 'Sass'; }
+  pre.src-scheme:before { content: 'Scheme'; }
+  pre.src-screen:before { content: 'Gnu Screen'; }
+  pre.src-sed:before { content: 'Sed'; }
+  pre.src-sh:before { content: 'shell'; }
+  pre.src-sql:before { content: 'SQL'; }
+  pre.src-sqlite:before { content: 'SQLite'; }
+  /* additional languages in org.el's org-babel-load-languages alist */
+  pre.src-forth:before { content: 'Forth'; }
+  pre.src-io:before { content: 'IO'; }
+  pre.src-J:before { content: 'J'; }
+  pre.src-makefile:before { content: 'Makefile'; }
+  pre.src-maxima:before { content: 'Maxima'; }
+  pre.src-perl:before { content: 'Perl'; }
+  pre.src-picolisp:before { content: 'Pico Lisp'; }
+  pre.src-scala:before { content: 'Scala'; }
+  pre.src-shell:before { content: 'Shell Script'; }
+  pre.src-ebnf2ps:before { content: 'ebfn2ps'; }
+  /* additional language identifiers per "defun org-babel-execute"
+       in ob-*.el */
+  pre.src-cpp:before  { content: 'C++'; }
+  pre.src-abc:before  { content: 'ABC'; }
+  pre.src-coq:before  { content: 'Coq'; }
+  pre.src-groovy:before  { content: 'Groovy'; }
+  /* additional language identifiers from org-babel-shell-names in
+     ob-shell.el: ob-shell is the only babel language using a lambda to put
+     the execution function name together. */
+  pre.src-bash:before  { content: 'bash'; }
+  pre.src-csh:before  { content: 'csh'; }
+  pre.src-ash:before  { content: 'ash'; }
+  pre.src-dash:before  { content: 'dash'; }
+  pre.src-ksh:before  { content: 'ksh'; }
+  pre.src-mksh:before  { content: 'mksh'; }
+  pre.src-posh:before  { content: 'posh'; }
+  /* Additional Emacs modes also supported by the LaTeX listings package */
+  pre.src-ada:before { content: 'Ada'; }
+  pre.src-asm:before { content: 'Assembler'; }
+  pre.src-caml:before { content: 'Caml'; }
+  pre.src-delphi:before { content: 'Delphi'; }
+  pre.src-html:before { content: 'HTML'; }
+  pre.src-idl:before { content: 'IDL'; }
+  pre.src-mercury:before { content: 'Mercury'; }
+  pre.src-metapost:before { content: 'MetaPost'; }
+  pre.src-modula-2:before { content: 'Modula-2'; }
+  pre.src-pascal:before { content: 'Pascal'; }
+  pre.src-ps:before { content: 'PostScript'; }
+  pre.src-prolog:before { content: 'Prolog'; }
+  pre.src-simula:before { content: 'Simula'; }
+  pre.src-tcl:before { content: 'tcl'; }
+  pre.src-tex:before { content: 'TeX'; }
+  pre.src-plain-tex:before { content: 'Plain TeX'; }
+  pre.src-verilog:before { content: 'Verilog'; }
+  pre.src-vhdl:before { content: 'VHDL'; }
+  pre.src-xml:before { content: 'XML'; }
+  pre.src-nxml:before { content: 'XML'; }
+  /* add a generic configuration mode; LaTeX export needs an additional
+     (add-to-list 'org-latex-listings-langs '(conf " ")) in .emacs */
+  pre.src-conf:before { content: 'Configuration File'; }
+
+  table { border-collapse:collapse; }
+  caption.t-above { caption-side: top; }
+  caption.t-bottom { caption-side: bottom; }
+  td, th { vertical-align:top;  }
+  th.org-right  { text-align: center;  }
+  th.org-left   { text-align: center;   }
+  th.org-center { text-align: center; }
+  td.org-right  { text-align: right;  }
+  td.org-left   { text-align: left;   }
+  td.org-center { text-align: center; }
+  dt { font-weight: bold; }
+  .footpara { display: inline; }
+  .footdef  { margin-bottom: 1em; }
+  .figure { padding: 1em; }
+  .figure p { text-align: center; }
+  .equation-container {
+    display: table;
+    text-align: center;
+    width: 100%;
+  }
+  .equation {
+    vertical-align: middle;
+  }
+  .equation-label {
+    display: table-cell;
+    text-align: right;
+    vertical-align: middle;
+  }
+  .inlinetask {
+    padding: 10px;
+    border: 2px solid gray;
+    margin: 10px;
+    background: #ffffcc;
+  }
+  #org-div-home-and-up
+   { text-align: right; font-size: 70%; white-space: nowrap; }
+  textarea { overflow-x: auto; }
+  .linenr { font-size: smaller }
+  .code-highlighted { background-color: #ffff00; }
+  .org-info-js_info-navigation { border-style: none; }
+  #org-info-js_console-label
+    { font-size: 10px; font-weight: bold; white-space: nowrap; }
+  .org-info-js_search-highlight
+    { background-color: #ffff00; color: #000000; font-weight: bold; }
+  .org-svg { }
+</style>
+<script src  = "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+<script src  = "https://cdn.minexiot.com/file/ems/scroll.js"></script>
+<script src  = "https://cdn.minexiot.com/file/ems/tex-mml-chtml.js"></script>
+<link   href = "https://cdn.minexiot.com/file/ems/base.css" rel="stylesheet" type="text/css"></link>
+</head>
+<body>
+<div id="preamble" class="status">
+<p>Made ✐︎ by 
+</div>
+<div id="content" class="content">
+<h1 class="title">本地语音转文字 FunASR on llama.cpp
+<br />
+<span class="subtitle">CPU-only、无 Python 运行时、OpenAI 兼容接口的本地 ASR 服务</span>
+</h1>
+<div id="table-of-contents" role="doc-toc">
+<h2>Table of Contents</h2>
+<div id="text-table-of-contents" role="doc-toc">
+<ul>
+<li><a href="#orgb8e9452">1. WHY</a></li>
+<li><a href="#org26a0bc9">2. 下载模型</a></li>
+<li><a href="#org4f1ef6c">3. 编译</a></li>
+<li><a href="#orga453620">4. 启动</a></li>
+<li><a href="#orge6e72f7">5. 在 OpenChamber 里使用</a></li>
+<li><a href="#org761553f">6. 在 debuff 里使用</a></li>
+<li><a href="#org032c4eb">7. 性能测试</a></li>
+</ul>
+</div>
+</div>
+<div id="outline-container-orgb8e9452" class="outline-2">
+<h2 id="orgb8e9452"><span class="section-number-2">1.</span> WHY</h2>
+<div class="outline-text-2" id="text-1">
+<p>
+这是一个本地的语音转文字（ASR）服务。它把 FunASR(<a href="https://github.com/modelscope/FunASR">https://github.com/modelscope/FunASR</a>) 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 `POST /v1/audio/transcriptions`。 也就是把本地录音文件转成文字。<br />
+</p>
+
+<p>
+它的特点：<br />
+</p>
+
+<ul class="org-ul">
+<li><b><b>不需要 GPU</b></b> ：纯 CPU 推理，Mac 笔记本、Linux 小盒子都能跑<br /></li>
+<li><b><b>不需要 Python 运行时</b></b> ：推理全部在 C++ 二进制里完成，只有一个很薄的 HTTP 包装层<br /></li>
+<li><b><b>数据不出本机</b></b> ：录音文件全部在本地处理，不上传任何服务器<br /></li>
+<li><b><b>OpenAI 兼容接口</b></b> ：OpenChamber、以及任何支持 OpenAI 语音接口的工具， 填个 URL 就能直接用<br /></li>
+</ul>
+</div>
+</div>
+<div id="outline-container-org26a0bc9" class="outline-2">
+<h2 id="org26a0bc9"><span class="section-number-2">2.</span> 下载模型</h2>
+<div class="outline-text-2" id="text-2">
+<p>
+本仓库默认跑的是  <b><b>Fun-ASR-Nano</b></b> （编码器 + Qwen3-0.6B 大语言模型 + FSMN-VAD 前端），模型都已经转换成 GGUF 格式，直接从 HuggingFace 下载 即可，不需要 Python 的深度学习环境。<br />
+</p>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">文件</th>
+<th scope="col" class="org-left">说明</th>
+<th scope="col" class="org-left">下载地址（HuggingFace）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>funasr-encoder-f16.gguf</code></td>
+<td class="org-left">SAN-M 音频编码器</td>
+<td class="org-left"><a href="https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF">https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF</a></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>qwen3-0.6b-q5km.gguf</code></td>
+<td class="org-left">Qwen3-0.6B 语言模型（5-bit 量化）</td>
+<td class="org-left">同上，同一仓库</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>fsmn-vad.gguf</code></td>
+<td class="org-left">语音活动检测（VAD，用于长音频切分）</td>
+<td class="org-left"><a href="https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF">https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF</a></td>
+</tr>
+</tbody>
+</table>
+
+<p>
+直接访问上面的 HuggingFace 仓库地址，把对应文件下载到 <code>gguf/</code> 目录即可。<br />
+</p>
+</div>
+</div>
+<div id="outline-container-org4f1ef6c" class="outline-2">
+<h2 id="org4f1ef6c"><span class="section-number-2">3.</span> 编译</h2>
+<div class="outline-text-2" id="text-3">
+<p>
+<code>llama-funasr-cli</code> 需要 <b><b>&ndash;server 常驻模式</b></b> 才能让服务只加载一次模型、常驻 内存处理请求。 <b><b>官方预编译的二进制不带这个参数</b></b> ，所以本方案不下载官方<br />
+二进制，而是 <b><b>直接从源码编译</b></b> （编译脚本会自动打好下面的加速补丁）。 编译产物不随本仓库 git 分发（已在 .gitignore 排除），换机器后重新编译一次即可。<br />
+</p>
+
+<p>
+<b>需要安装的前置软件</b><br />
+</p>
+
+<p>
+编译前先确认下面几个软件已经装好：<br />
+</p>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">前置软件</th>
+<th scope="col" class="org-left">作用</th>
+<th scope="col" class="org-left">macOS 安装方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">git</td>
+<td class="org-left">拉取 FunASR 源码</td>
+<td class="org-left">随 Xcode 命令行工具自带；或 <code>brew install git</code></td>
+</tr>
+
+<tr>
+<td class="org-left">cmake</td>
+<td class="org-left">配置并编译（会自动拉取 llama.cpp 并构建）</td>
+<td class="org-left"><code>brew install cmake</code></td>
+</tr>
+
+<tr>
+<td class="org-left">C/C++ 工具链（clang/make）</td>
+<td class="org-left">编译 C++ 源码</td>
+<td class="org-left"><code>xcode-select --install</code></td>
+</tr>
+</tbody>
+</table>
+
+<p>
+装完后验证都能用：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code><span style="color: #cd9575;">git</span> --version
+cmake --version
+clang --version
+</code></pre>
+</div>
+
+<p>
+<b>补丁是做什么的</b><br />
+</p>
+
+<p>
+官方 CLI 是&ldquo;一次性&rdquo;版本：转完一个音频就退出，每个请求都要重新加载约 1GB 的模型。<br />
+本仓库默认的 <b><b>常驻模式</b></b> （`start-funasr-server.sh` 拉起一个 `llama-funasr-cli &ndash;server` worker，模型只加载一次，处理音频更快）需要 <code>--server</code> 参数，官方二进制不带它，所以仓库放了补丁：<br />
+</p>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">文件</th>
+<th scope="col" class="org-left">作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>patches/llama-funasr-cli.server-mode.patch</code></td>
+<td class="org-left">给官方 CLI 源码新增 <code>--server</code> 常驻模式参数（可重复打，幂等）</td>
+</tr>
+</tbody>
+</table>
+
+<p>
+<b>怎么编译并打好补丁</b><br />
+</p>
+
+<p>
+用仓库自带的一键脚本（自动完成：拉源码 → 打补丁 → 编译 →  得到 <code>llama-funasr-cli</code> ）：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code>./build-funasr-cli-server.sh --install
+</code></pre>
+</div>
+
+<p>
+验证补丁是否打上（编译成功的二进制在 &ndash;help 里应能看到 &ndash;server）：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code>./llama-funasr-cli --help 2&gt;&amp;1 | <span style="color: #cd9575;">grep</span> -- --server
+</code></pre>
+</div>
+</div>
+</div>
+<div id="outline-container-orga453620" class="outline-2">
+<h2 id="orga453620"><span class="section-number-2">4.</span> 启动</h2>
+<div class="outline-text-2" id="text-4">
+<p>
+确保以下文件存在：<br />
+</p>
+
+<ul class="org-ul">
+<li><code>llama-funasr-cli</code> ← 由上一步编译生成（不随 git 分发）<br /></li>
+<li><code>gguf/qwen3-0.6b-q5km.gguf</code><br /></li>
+<li><code>gguf/funasr-encoder-f16.gguf</code><br /></li>
+<li><code>gguf/fsmn-vad.gguf</code><br /></li>
+</ul>
+
+<p>
+缺执行文件的话，先按上节「编译 llama-funasr-cli」编译；缺模型的话，直接按 上文地址从 HuggingFace 下载到 <code>gguf/</code> 目录。<br />
+</p>
+
+<p>
+一键启动（默认端口 8001，会先杀掉占用 8001 的旧进程再启动）。脚本把服务 放到 <b><b>后台</b></b> 运行，打印一段日志后立即退出，并报告 <b><b>启动成功/失败</b></b> ：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code>./start-funasr-server.sh
+</code></pre>
+</div>
+
+<ul class="org-ul">
+<li>启动成功 → 输出 <code>启动成功 ✓  http://127.0.0.1:8001 (PID xxx)</code> ，脚本退出码 0<br /></li>
+<li>启动失败 → 输出 <code>启动失败 ✗</code> 并附日志尾部，脚本退出码 1<br /></li>
+<li>服务日志写在 <code>funasr-server/server.log</code><br /></li>
+</ul>
+
+<p>
+验证是否启动成功：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code><span style="color: #cd9575;">curl</span> http://127.0.0.1:8001/health          <span style="color: #545c5e;"># </span><span style="color: #545c5e;">&#26399;&#26395;: {"status": "ok"}</span>
+</code></pre>
+</div>
+
+<p>
+也可以直接命令行测试转写：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code><span style="color: #cd9575;">curl</span> http://127.0.0.1:8001/v1/audio/transcriptions <span style="color: #6fb593;">\</span>
+  -F <span style="color: #968cc7;">file</span>=@/tmp/xxx.wav -F <span style="color: #968cc7;">model</span>=funasr-gguf
+</code></pre>
+</div>
+
+<p>
+如需改端口/模型，用环境变量，例如 <code>FUNASR_PORT=9000 ./start-funasr-server.sh</code><br />
+</p>
+
+<p>
+停止服务：<br />
+</p>
+
+<div class="org-src-container">
+<pre class="src src-bash"><code><span style="color: #cd9575;">kill</span> &lt;&#33050;&#26412;&#36755;&#20986;&#30340; PID&gt;
+</code></pre>
+</div>
+</div>
+</div>
+<div id="outline-container-orge6e72f7" class="outline-2">
+<h2 id="orge6e72f7"><span class="section-number-2">5.</span> 在 OpenChamber 里使用</h2>
+<div class="outline-text-2" id="text-5">
+<ol class="org-ol">
+<li>先按上面步骤启动服务。<br /></li>
+<li>打开 OpenChamber → 设置（Settings）→ 语音（Voice）→ 语音输入。<br /></li>
+<li>提供者（Provider）选择 <b><b>服务器 / Server</b></b> （即 OpenAI 兼容）。<br /></li>
+<li>填写以下三项：<br /></li>
+</ol>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">字段</th>
+<th scope="col" class="org-left">值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">服务器 URL</td>
+<td class="org-left"><code>http://127.0.0.1:8001/v1</code></td>
+</tr>
+
+<tr>
+<td class="org-left">模型（Model）</td>
+<td class="org-left">#ERROR</td>
+</tr>
+
+<tr>
+<td class="org-left">API Key</td>
+<td class="org-left">留空或随便填，如 <code>not-required</code></td>
+</tr>
+</tbody>
+</table>
+
+<ol class="org-ol">
+<li>语言（Language）留空即可（自动检测），或填 <code>zh</code> / <code>en</code><br /></li>
+<li>保存后，对着输入框说话，文字就会插入到对话里。<br /></li>
+</ol>
+
+<p>
+说明：OpenChamber 会把录音转成 WAV 并 POST 到<br />
+<code>服务器 URL + /audio/transcriptions</code> ，所以填 <code>http://127.0.0.1:8001/v1</code> （ <code>127.0.0.1</code> 是允许的本地地址）。<br />
+</p>
+</div>
+</div>
+<div id="outline-container-org761553f" class="outline-2">
+<h2 id="org761553f"><span class="section-number-2">6.</span> 在 debuff 里使用</h2>
+<div class="outline-text-2" id="text-6">
+<p>
+debuff 要求填 <b><b>完整的转写接口地址</b></b> （不能只填到 <code>/v1</code> ）。此时把下面 这个地址直接填成 URL：<br />
+</p>
+
+<ul class="org-ul">
+<li>URL / 接口地址： <code>http://127.0.0.1:8001/v1/audio/transcriptions</code><br /></li>
+<li>模型（Model）： <code>funasr-gguf</code> （任意字符串，服务端不校验）<br /></li>
+<li>API Key：留空或随便填，如 <code>not-required</code><br /></li>
+</ul>
+</div>
+</div>
+<div id="outline-container-org032c4eb" class="outline-2">
+<h2 id="org032c4eb"><span class="section-number-2">7.</span> 性能测试</h2>
+<div class="outline-text-2" id="text-7">
+<p>
+测试机器：MacBook Pro 14 英寸，Apple M1 Pro（8 性能核 + 2 能效核）， 16GB 内存，macOS 26.6.2。<br />
+</p>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">项目</th>
+<th scope="col" class="org-left">数值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">服务常驻内存（Python 包装进程，空闲）</td>
+<td class="org-left">约 13~23 MB</td>
+</tr>
+
+<tr>
+<td class="org-left">单次转写时推理进程峰值内存</td>
+<td class="org-left">约 1.56 GB</td>
+</tr>
+
+<tr>
+<td class="org-left">模型磁盘占用</td>
+<td class="org-left">编码器 469 MB + Qwen3 551 MB + VAD 1.7 MB ≈ 1.0 GB</td>
+</tr>
+
+<tr>
+<td class="org-left">是否需要 GPU</td>
+<td class="org-left">不需要</td>
+</tr>
+
+<tr>
+<td class="org-left">转写速度（10 秒音频，常驻模式，模型已加载）</td>
+<td class="org-left">约 0.5 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">转写速度（20 秒音频，常驻模式，模型已加载）</td>
+<td class="org-left">约 1.0 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">转写速度（50 秒音频，常驻模式，模型已加载）</td>
+<td class="org-left">约 3.5 秒</td>
+</tr>
+</tbody>
+</table>
+
+<p>
+服务默认以 <b><b>常驻模式</b></b> 运行：启动时加载一次模型（约 1~1.5 秒），之后每个请求 直接复用内存里的模型，不再重新加载。实测耗时：<br />
+</p>
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">音频时长</th>
+<th scope="col" class="org-left">常驻模式</th>
+<th scope="col" class="org-left">每请求拉起子进程（旧模式）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">10 秒</td>
+<td class="org-left">~0.5 秒</td>
+<td class="org-left">~1.4~2.5 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">20 秒</td>
+<td class="org-left">~1.0 秒</td>
+<td class="org-left">~1.8~2.5 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">30 秒</td>
+<td class="org-left">~1.5 秒</td>
+<td class="org-left">~2.5~2.9 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">40 秒</td>
+<td class="org-left">~3.1 秒</td>
+<td class="org-left">~4.0~4.4 秒</td>
+</tr>
+
+<tr>
+<td class="org-left">50 秒</td>
+<td class="org-left">~3.5 秒</td>
+<td class="org-left">~4.5~5.0 秒</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<div id="postamble" class="status">
+<p class="date">Date: 2026-09-01 Tue 16:40</p>
+<p class="author">Author: van</p>
+<p class="date">Created: 2026-09-03 Thu 11:13</p>
+</div>
+</body>
+</html>
