@@ -16,6 +16,8 @@ https://github.com/sincebyte/LocalAudioSTT 是一个本地的语音转文字（A
 - **数据不出本机** ：录音文件全部在本地处理，不上传任何服务器
 - **OpenAI 兼容接口** ：OpenChamber、以及任何支持 OpenAI 语音接口的工具， 填个 URL 就能直接用
 - **常驻模式** 本项目优化补丁，模型只加载一次，处理音频更快
+  
+[[file:pic202609005956.png]]
 
 ** 下载模型
 
