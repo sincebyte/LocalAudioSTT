@@ -1,22 +1,23 @@
-#+TITLE: 本地语音转文字 FunASR on llama.cpp
+#+TITLE: 本地语音转文字 LocalAudioSTT
 #+subtitle: CPU-only、无 Python 运行时、OpenAI 兼容接口的本地 ASR 服务
 #+author: van
 #+date: <2026-09-01 16:40>
 #+SETUPFILE: ~/.doom.d/org-classic-head.setup
 
-* WHY
+* outline
+** WHY
 
-这是一个本地的语音转文字（ASR）服务。它把 FunASR(https://github.com/modelscope/FunASR) 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 `POST /v1/audio/transcriptions`。 也就是把本地录音文件转成文字。
+https://github.com/sincebyte/LocalAudioSTT 是一个本地的语音转文字（ASR）服务。它把 FunASR(https://github.com/modelscope/FunASR) 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 `POST /v1/audio/transcriptions`。 也就是把本地录音文件转成文字。
 
-它的特点：
+结合FunASR的特点：
 
 - **不需要 GPU** ：纯 CPU 推理，Mac 笔记本、Linux 小盒子都能跑
 - **不需要 Python 运行时** ：推理全部在 C++ 二进制里完成，只有一个很薄的 HTTP 包装层
 - **数据不出本机** ：录音文件全部在本地处理，不上传任何服务器
 - **OpenAI 兼容接口** ：OpenChamber、以及任何支持 OpenAI 语音接口的工具， 填个 URL 就能直接用
-- **常驻模式** 本项目优化：模型只加载一次，处理音频更快
+- **常驻模式** 本项目优化补丁，模型只加载一次，处理音频更快
 
-* 下载模型
+** 下载模型
 
 本仓库默认跑的是  **Fun-ASR-Nano** （编码器 + Qwen3-0.6B 大语言模型 + FSMN-VAD 前端），模型都已经转换成 GGUF 格式，直接从 HuggingFace 下载 即可，不需要 Python 的深度学习环境。
 
@@ -28,7 +29,7 @@
 
 直接访问上面的 HuggingFace 仓库地址，把对应文件下载到 =gguf/= 目录即可。
 
-* 编译 
+** 编译 
 
 =llama-funasr-cli= 需要 **--server 常驻模式** 才能让服务只加载一次模型、常驻 内存处理请求。 **官方预编译的二进制不带这个参数** ，所以本方案不下载官方
 二进制，而是 **直接从源码编译** （编译脚本会自动打好下面的加速补丁）。 编译产物不随本仓库 git 分发（已在 .gitignore 排除），换机器后重新编译一次即可。
@@ -74,7 +75,7 @@ clang --version
 ./llama-funasr-cli --help 2>&1 | grep -- --server
 #+END_SRC
 
-* 启动
+** 启动
 
 确保以下文件存在：
 
@@ -116,7 +117,7 @@ curl http://127.0.0.1:8001/v1/audio/transcriptions \
 kill <脚本输出的 PID>
 #+END_SRC
 
-* 在 OpenChamber 里使用
+** 在 OpenChamber 里使用
 
 1. 先按上面步骤启动服务。
 2. 打开 OpenChamber → 设置（Settings）→ 语音（Voice）→ 语音输入。
@@ -136,7 +137,7 @@ kill <脚本输出的 PID>
 说明：OpenChamber 会把录音转成 WAV 并 POST 到
 =服务器 URL + /audio/transcriptions= ，所以填 =http://127.0.0.1:8001/v1= （ =127.0.0.1= 是允许的本地地址）。
 
-* 在 debuff 里使用
+** 在 debuff 里使用
 
 debuff 要求填 **完整的转写接口地址** （不能只填到 =/v1= ）。此时把下面 这个地址直接填成 URL：
 
@@ -144,7 +145,7 @@ debuff 要求填 **完整的转写接口地址** （不能只填到 =/v1= ）。
 - 模型（Model）： =funasr-gguf= （任意字符串，服务端不校验）
 - API Key：留空或随便填，如 =not-required=
 
-* 性能测试
+** 性能测试
 
 测试机器：MacBook Pro 14 英寸，Apple M1 Pro（8 性能核 + 2 能效核）， 16GB 内存，macOS 26.6.2。
 

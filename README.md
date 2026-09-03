@@ -1,35 +1,40 @@
 
 # Table of Contents
 
-1.  [WHY](#orgaf11bc0)
-2.  [下载模型](#orga4e82f7)
-3.  [编译](#org4142089)
-4.  [启动](#org2378a21)
-5.  [在 OpenChamber 里使用](#org3d98268)
-6.  [在 debuff 里使用](#orgd726137)
-7.  [性能测试](#orgdd5a798)
+1.  [outline](#org50eced9)
+    1.  [WHY](#orge38fcbd)
+    2.  [下载模型](#org652bc59)
+    3.  [编译](#org9cf23be)
+    4.  [启动](#org376b8f9)
+    5.  [在 OpenChamber 里使用](#orgc3c4564)
+    6.  [在 debuff 里使用](#org62e966b)
+    7.  [性能测试](#org2444dd0)
 
 
 
-<a id="orgaf11bc0"></a>
+<a id="org50eced9"></a>
 
-# WHY
+# outline
 
-这是一个本地的语音转文字（ASR）服务。它把 FunASR 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 \`POST /v1/audio/transcriptions\`。 也就是把本地录音文件转成文字。  
 
-它的特点：  
+<a id="orge38fcbd"></a>
+
+## WHY
+
+<https://github.com/sincebyte/LocalAudioSTT> 是一个本地的语音转文字（ASR）服务。它把 FunASR(<https://github.com/modelscope/FunASR>) 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 \`POST /v1/audio/transcriptions\`。 也就是把本地录音文件转成文字。  
+
+结合FunASR的特点：  
 
 -   ****不需要 GPU**** ：纯 CPU 推理，Mac 笔记本、Linux 小盒子都能跑
--   ****不需要 Python 运行时**** ：推理全部在 C++ 二进制里完成，只有一个很薄的  
-    HTTP 包装层
+-   ****不需要 Python 运行时**** ：推理全部在 C++ 二进制里完成，只有一个很薄的 HTTP 包装层
 -   ****数据不出本机**** ：录音文件全部在本地处理，不上传任何服务器
--   ****OpenAI 兼容接口**** ：OpenChamber、以及任何支持 OpenAI 语音接口的工具，  
-    填个 URL 就能直接用
+-   ****OpenAI 兼容接口**** ：OpenChamber、以及任何支持 OpenAI 语音接口的工具， 填个 URL 就能直接用
+-   ****常驻模式**** 本项目优化补丁，模型只加载一次，处理音频更快
 
 
-<a id="orga4e82f7"></a>
+<a id="org652bc59"></a>
 
-# 下载模型
+## 下载模型
 
 本仓库默认跑的是  ****Fun-ASR-Nano**** （编码器 + Qwen3-0.6B 大语言模型 + FSMN-VAD 前端），模型都已经转换成 GGUF 格式，直接从 HuggingFace 下载 即可，不需要 Python 的深度学习环境。  
 
@@ -74,14 +79,12 @@
 直接访问上面的 HuggingFace 仓库地址，把对应文件下载到 `gguf/` 目录即可。  
 
 
-<a id="org4142089"></a>
+<a id="org9cf23be"></a>
 
-# 编译
+## 编译
 
-`llama-funasr-cli` 需要 ****&ndash;server 常驻模式**** 才能让服务只加载一次模型、常驻  
-内存处理请求。\*\*官方预编译的二进制不带这个参数\*\* ，所以本方案不下载官方  
-二进制，而是 ****直接从源码编译**** （编译脚本会自动打好下面的加速补丁）。  
-编译产物不随本仓库 git 分发（已在 .gitignore 排除），换机器后重新编译一次即可。  
+`llama-funasr-cli` 需要 ****&ndash;server 常驻模式**** 才能让服务只加载一次模型、常驻 内存处理请求。 ****官方预编译的二进制不带这个参数**** ，所以本方案不下载官方  
+二进制，而是 ****直接从源码编译**** （编译脚本会自动打好下面的加速补丁）。 编译产物不随本仓库 git 分发（已在 .gitignore 排除），换机器后重新编译一次即可。  
 
 **需要安装的前置软件**  
 
@@ -124,9 +127,6 @@
 </tr>
 </tbody>
 </table>
-
-\`brew\`（Homebrew）还没装的话，先装：  
-`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`  
 
 装完后验证都能用：  
 
@@ -172,9 +172,9 @@
     ./llama-funasr-cli --help 2>&1 | grep -- --server
 
 
-<a id="org2378a21"></a>
+<a id="org376b8f9"></a>
 
-# 启动
+## 启动
 
 确保以下文件存在：  
 
@@ -183,8 +183,7 @@
 -   `gguf/funasr-encoder-f16.gguf`
 -   `gguf/fsmn-vad.gguf`
 
-缺执行文件的话，先按上节「编译 llama-funasr-cli」编译；缺模型的话，直接按  
-上文地址从 HuggingFace 下载到 `gguf/` 目录。  
+缺执行文件的话，先按上节「编译 llama-funasr-cli」编译；缺模型的话，直接按 上文地址从 HuggingFace 下载到 `gguf/` 目录。  
 
 一键启动（默认端口 8001，会先杀掉占用 8001 的旧进程再启动）。脚本把服务 放到 ****后台**** 运行，打印一段日志后立即退出，并报告 ****启动成功/失败**** ：  
 
@@ -210,9 +209,9 @@
     kill <脚本输出的 PID>
 
 
-<a id="org3d98268"></a>
+<a id="orgc3c4564"></a>
 
-# 在 OpenChamber 里使用
+## 在 OpenChamber 里使用
 
 1.  先按上面步骤启动服务。
 2.  打开 OpenChamber → 设置（Settings）→ 语音（Voice）→ 语音输入。
@@ -258,9 +257,9 @@
 `服务器 URL + /audio/transcriptions` ，所以填 `http://127.0.0.1:8001/v1` （ `127.0.0.1` 是允许的本地地址）。  
 
 
-<a id="orgd726137"></a>
+<a id="org62e966b"></a>
 
-# 在 debuff 里使用
+## 在 debuff 里使用
 
 debuff 要求填 ****完整的转写接口地址**** （不能只填到 `/v1` ）。此时把下面 这个地址直接填成 URL：  
 
@@ -269,9 +268,9 @@ debuff 要求填 ****完整的转写接口地址**** （不能只填到 `/v1` �
 -   API Key：留空或随便填，如 `not-required`
 
 
-<a id="orgdd5a798"></a>
+<a id="org2444dd0"></a>
 
-# 性能测试
+## 性能测试
 
 测试机器：MacBook Pro 14 英寸，Apple M1 Pro（8 性能核 + 2 能效核）， 16GB 内存，macOS 26.6.2。  
 
