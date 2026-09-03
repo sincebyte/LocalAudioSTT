@@ -1,24 +1,3 @@
-
-# Table of Contents
-
-1.  [outline](#org50eced9)
-    1.  [WHY](#orge38fcbd)
-    2.  [下载模型](#org652bc59)
-    3.  [编译](#org9cf23be)
-    4.  [启动](#org376b8f9)
-    5.  [在 OpenChamber 里使用](#orgc3c4564)
-    6.  [在 debuff 里使用](#org62e966b)
-    7.  [性能测试](#org2444dd0)
-
-
-
-<a id="org50eced9"></a>
-
-# outline
-
-
-<a id="orge38fcbd"></a>
-
 ## WHY
 
 <https://github.com/sincebyte/LocalAudioSTT> 是一个本地的语音转文字（ASR）服务。它把 FunASR(<https://github.com/modelscope/FunASR>) 的 GGUF 模型跑在 llama.cpp 上，暴露一个 OpenAI 兼容的接口 \`POST /v1/audio/transcriptions\`。 也就是把本地录音文件转成文字。  
