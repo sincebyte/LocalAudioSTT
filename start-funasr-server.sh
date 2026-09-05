@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="${FUNASR_HOST:-127.0.0.1}"
 PORT="${FUNASR_PORT:-8001}"
 BINARY="${FUNASR_BINARY:-$SCRIPT_DIR/llama-funasr-cli}"
-MODEL="${FUNASR_MODEL:-$SCRIPT_DIR/gguf/qwen3-0.6b-q5km.gguf}"
+# LLM 精度实验: q8_0 为默认(速度/效果平衡)。BF16 在 CPU 解码下太慢(~90s/请求), 已弃用; q5km 也可用
+MODEL="${FUNASR_MODEL:-$SCRIPT_DIR/gguf/qwen3-0.6b-q8_0.gguf}"
 ENCODER="${FUNASR_ENCODER:-$SCRIPT_DIR/gguf/funasr-encoder-f16.gguf}"
 VAD="${FUNASR_VAD:-$SCRIPT_DIR/gguf/fsmn-vad.gguf}"
 TIMEOUT="${FUNASR_TIMEOUT:-300}"
@@ -58,7 +59,9 @@ PERSISTENT_FLAG=""
 if [ "$PERSISTENT" = "1" ]; then
   PERSISTENT_FLAG="--persistent"
 fi
-nohup python3 "$SCRIPT_DIR/funasr-server/funasr_gguf_server.py" \
+# nohup 在无控制终端的上下文(SSH/agent/面板)会报 "can't detach from console" 并导致后台进程被杀,
+# 改用 < /dev/null + disown: 真实终端与无 tty 环境都能稳定后台运行。
+python3 "$SCRIPT_DIR/funasr-server/funasr_gguf_server.py" \
   --host "$HOST" \
   --port "$PORT" \
   --binary "$BINARY" \
@@ -67,8 +70,9 @@ nohup python3 "$SCRIPT_DIR/funasr-server/funasr_gguf_server.py" \
   --extra-arg "--enc $ENCODER" \
   --timeout "$TIMEOUT" \
   $PERSISTENT_FLAG \
-  >> "$LOG_FILE" 2>&1 &
+  >> "$LOG_FILE" 2>&1 < /dev/null &
 SERVER_PID=$!
+disown "$SERVER_PID" 2>/dev/null || true
 
 # Wait for /health up to ~10s to report success or failure.
 UP=0
