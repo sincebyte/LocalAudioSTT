@@ -38,6 +38,7 @@ class ServerConfig:
     model: str
     vad: Optional[str] = None
     backend: Optional[str] = None
+    prompt: Optional[str] = None
     extra_args: list[str] = field(default_factory=list)
     work_dir: str = field(default_factory=tempfile.gettempdir)
     timeout: float = 600.0
@@ -50,6 +51,8 @@ def build_command(config: ServerConfig, audio_path: str) -> list[str]:
         command.extend(["--vad", config.vad])
     if config.backend:
         command.extend(["--backend", config.backend])
+    if config.prompt:
+        command.extend(["--prompt", config.prompt])
     command.extend(config.extra_args)
     return command
 
@@ -61,6 +64,8 @@ def build_worker_command(config: ServerConfig) -> list[str]:
         command.extend(["--vad", config.vad])
     if config.backend:
         command.extend(["--backend", config.backend])
+    if config.prompt:
+        command.extend(["--prompt", config.prompt])
     command.extend(config.extra_args)
     return command
 
@@ -346,6 +351,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True, help="Path to the model GGUF passed as -m.")
     parser.add_argument("--vad", help="Optional FSMN-VAD GGUF passed as --vad.")
     parser.add_argument("--backend", choices=["cpu", "cuda"], help="Optional backend passed as --backend.")
+    parser.add_argument(
+        "--prompt",
+        help="Optional text passed to the GGUF binary as --prompt: replaces the "
+        "default user instruction ('语音转写：') with a custom hint, e.g. a command "
+        "word list, to bias recognition. Applied to every request.",
+    )
     parser.add_argument("--work-dir", default=tempfile.gettempdir(), help="Directory for temporary uploaded audio files.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-request subprocess timeout in seconds.")
     parser.add_argument(
@@ -373,6 +384,7 @@ def main() -> None:
             model=args.model,
             vad=args.vad,
             backend=args.backend,
+            prompt=args.prompt,
             extra_args=_parse_extra_args(args.extra_arg),
             work_dir=args.work_dir,
             timeout=args.timeout,
@@ -385,6 +397,7 @@ def main() -> None:
         model=args.model,
         vad=args.vad,
         backend=args.backend,
+        prompt=args.prompt,
         extra_args=_parse_extra_args(args.extra_arg),
         work_dir=args.work_dir,
         timeout=args.timeout,

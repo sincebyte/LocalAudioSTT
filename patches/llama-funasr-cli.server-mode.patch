@@ -1,7 +1,5 @@
-diff --git a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
-index 7d0929f..c2c8bec 100644
---- a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
-+++ b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
+--- a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp	2026-09-05 22:31:14
++++ b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp	2026-09-05 22:31:13
 @@ -15,6 +15,7 @@
  #include "gguf.h"
  #include "llama.h"
@@ -10,17 +8,20 @@ index 7d0929f..c2c8bec 100644
  #include <cmath>
  #include <cstdint>
  #include <cstdio>
-@@ -172,13 +173,32 @@ static void print_usage(const char*argv0){
+@@ -172,13 +173,35 @@
          "usage: %s --enc enc.gguf -m llm.gguf -a audio.wav"
          " [-n npred] [--chunk sec]"
          " [--vad fsmn-vad.gguf [--vad-maxseg ms]]"
 -        " [--srt] [--rep R]\n", argv0);
-+        " [--srt] [--rep R]\n"
++        " [--srt] [--rep R] [--prompt TEXT]\n"
 +        "       %s --enc enc.gguf -m llm.gguf --server"
-+        " [--vad fsmn-vad.gguf]  (persistent: read one wav path per stdin line)\n",
++        " [--vad fsmn-vad.gguf] [--prompt TEXT]"
++        "  (persistent: read one wav path per stdin line)\n"
++        "  --prompt TEXT  replaces the default user instruction '语音转写：' with TEXT;\n"
++        "                 e.g. biasing the decoder towards command words.\n",
 +        argv0, argv0);
-+}
-+
+ }
+ 
 +// Base64 of the transcript: lets the caller split results robustly on newlines.
 +static std::string b64encode(const char* data, size_t len){
 +    static const char tbl[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -35,21 +36,23 @@ index 7d0929f..c2c8bec 100644
 +        out.push_back((i+2<len)?tbl[c&63]:'=');
 +    }
 +    return out;
- }
- 
++}
++
  int main(int argc,char**argv){
-     std::string enc_path,llm_path,wav_path,vad_path; int npred=512; double chunk_sec=0; float rep=1.0f;
+-    std::string enc_path,llm_path,wav_path,vad_path; int npred=512; double chunk_sec=0; float rep=1.0f;
++    std::string enc_path,llm_path,wav_path,vad_path,prompt; int npred=512; double chunk_sec=0; float rep=1.0f;
      int vad_maxseg=30000;
 -    bool srt_mode=false;
 +    bool srt_mode=false, server_mode=false;
      for(int i=1;i<argc;i++){
          if(!strcmp(argv[i],"--enc")&&i+1<argc)enc_path=argv[++i];
          else if(!strcmp(argv[i],"-m")&&i+1<argc)llm_path=argv[++i];
-@@ -188,13 +208,15 @@ int main(int argc,char**argv){
+@@ -188,13 +211,16 @@
          else if(!strcmp(argv[i],"--vad")&&i+1<argc)vad_path=argv[++i];
          else if(!strcmp(argv[i],"--vad-maxseg")&&i+1<argc)vad_maxseg=atoi(argv[++i]);
          else if(!strcmp(argv[i],"--srt"))srt_mode=true;
 +        else if(!strcmp(argv[i],"--server"))server_mode=true;
++        else if(!strcmp(argv[i],"--prompt")&&i+1<argc)prompt=argv[++i];
          else if(!strcmp(argv[i],"--rep")&&i+1<argc)rep=atof(argv[++i]);
          else { print_usage(argv[0]); return 1; }
      }
@@ -64,9 +67,21 @@ index 7d0929f..c2c8bec 100644
      ggml_time_init(); // Required before ggml_time_us() on Windows.
      int64_t t0=ggml_time_us();
  
-@@ -217,63 +239,94 @@ int main(int argc,char**argv){
+@@ -211,69 +237,104 @@
+     if(rep!=1.0f) llama_sampler_chain_add(smpl,llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),256,rep,0.0f,0.0f));
+     llama_sampler_chain_add(smpl,llama_sampler_init_greedy());
+ 
+-    const char*prefix="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：";
++    // If --prompt is given it fully replaces the default user instruction
++    // "语音转写："; the audio embeds are inserted right after this text, so the
++    // hint doubles as a weak contextual bias (word/command lists, etc).
++    std::string user_msg = prompt.empty() ? "语音转写：" : prompt;
+     const char*suffix="<|im_end|>\n<|im_start|>assistant\n";
+     auto tokenize=[&](const char*s){int n=-llama_tokenize(vocab,s,strlen(s),nullptr,0,false,true);
          std::vector<llama_token> v(n); llama_tokenize(vocab,s,strlen(s),v.data(),n,false,true); return v;};
-     auto pre=tokenize(prefix); auto suf=tokenize(suffix);
+-    auto pre=tokenize(prefix); auto suf=tokenize(suffix);
++    std::string prefix="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n"+user_msg;
++    auto pre=tokenize(prefix.c_str()); auto suf=tokenize(suffix);
  
 -    // Build the list of [offset,len] windows to transcribe (in samples).
 -    //   --vad : FSMN-VAD speech segments (single-binary front end, replaces fixed chunking)
@@ -82,6 +97,36 @@ index 7d0929f..c2c8bec 100644
 -        int chunk_n = chunk_sec > 0 ? std::max(1, (int)(chunk_sec*16000)) : (int)wav.size();
 -        for(size_t off=0; off<wav.size(); off+=chunk_n) wins.push_back({(int)off,(int)std::min((size_t)chunk_n,wav.size()-off)});
 -    }
+-
+-    int srt_idx = 0;
+-    for (auto& w : wins) {
+-        int off = w.first, len = w.second;
+-        if (len < WINLEN) continue;                    // too short for one frame
+-        int start_ms = (int)((int64_t)off * 1000 / 16000);
+-        int end_ms   = (int)((int64_t)(off + len) * 1000 / 16000);
+-        std::vector<float> seg(wav.begin()+off, wav.begin()+off+len);
+-        int T=0; auto fbank=compute_fbank(seg,T);
+-        int D=0; auto adp=run_encoder(em,fbank,T,560,D);
+-        int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
+-
+-        llama_memory_clear(llama_get_memory(ctx), true);  // fresh context per chunk
+-        int n_past=0;
+-        decode_batch(ctx,pre.size(),pre.data(),nullptr,0,n_past,false);
+-        decode_batch(ctx,n_aud,nullptr,adp.data(),D,n_past,false);
+-        decode_batch(ctx,suf.size(),suf.data(),nullptr,0,n_past,true);
+-
+-        // In SRT mode, buffer tokens and print the whole entry via format_srt_line.
+-        // In normal mode, stream tokens directly (original behavior, no per-segment newline).
+-        std::string seg_text;
+-        llama_token tk=llama_sampler_sample(smpl,ctx,-1);
+-        for(int i=0;i<npred;i++){
+-            if(llama_vocab_is_eog(vocab,tk))break;
+-            char buf[256]; int k=llama_token_to_piece(vocab,tk,buf,sizeof(buf),0,true);
+-            if(k>0){
+-                seg_text.append(buf, k);
+-            }
+-            decode_batch(ctx,1,&tk,nullptr,0,n_past,true);
+-            tk=llama_sampler_sample(smpl,ctx,-1);
 +    // Transcribe one audio file with the already-loaded models; append text to `out`.
 +    auto transcribe_path=[&](const char*wav_path, std::string& out)->bool{
 +        std::vector<float> wav;
@@ -100,8 +145,12 @@ index 7d0929f..c2c8bec 100644
 +        } else {
 +            int chunk_n = chunk_sec > 0 ? std::max(1, (int)(chunk_sec*16000)) : (int)wav.size();
 +            for(size_t off=0; off<wav.size(); off+=chunk_n) wins.push_back({(int)off,(int)std::min((size_t)chunk_n,wav.size()-off)});
-+        }
-+
+         }
+ 
+-        if(srt_mode){
+-            if (seg_text != "/sil") {
+-                srt_idx++;
+-                format_srt_line(srt_idx, start_ms, end_ms, seg_text);
 +        int srt_idx = 0;
 +        for (auto& w : wins) {
 +            int off = w.first, len = w.second;
@@ -112,28 +161,13 @@ index 7d0929f..c2c8bec 100644
 +            int T=0; auto fbank=compute_fbank(seg,T);
 +            int D=0; auto adp=run_encoder(em,fbank,T,560,D);
 +            int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
- 
--    int srt_idx = 0;
--    for (auto& w : wins) {
--        int off = w.first, len = w.second;
--        if (len < WINLEN) continue;                    // too short for one frame
--        int start_ms = (int)((int64_t)off * 1000 / 16000);
--        int end_ms   = (int)((int64_t)(off + len) * 1000 / 16000);
--        std::vector<float> seg(wav.begin()+off, wav.begin()+off+len);
--        int T=0; auto fbank=compute_fbank(seg,T);
--        int D=0; auto adp=run_encoder(em,fbank,T,560,D);
--        int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
++
 +            llama_memory_clear(llama_get_memory(ctx), true);  // fresh context per chunk
 +            int n_past=0;
 +            decode_batch(ctx,pre.size(),pre.data(),nullptr,0,n_past,false);
 +            decode_batch(ctx,n_aud,nullptr,adp.data(),D,n_past,false);
 +            decode_batch(ctx,suf.size(),suf.data(),nullptr,0,n_past,true);
- 
--        llama_memory_clear(llama_get_memory(ctx), true);  // fresh context per chunk
--        int n_past=0;
--        decode_batch(ctx,pre.size(),pre.data(),nullptr,0,n_past,false);
--        decode_batch(ctx,n_aud,nullptr,adp.data(),D,n_past,false);
--        decode_batch(ctx,suf.size(),suf.data(),nullptr,0,n_past,true);
++
 +            // In SRT mode, buffer tokens and print the whole entry via format_srt_line.
 +            // In normal mode, buffer tokens into seg_text.
 +            std::string seg_text;
@@ -146,17 +180,10 @@ index 7d0929f..c2c8bec 100644
 +                }
 +                decode_batch(ctx,1,&tk,nullptr,0,n_past,true);
 +                tk=llama_sampler_sample(smpl,ctx,-1);
-+            }
- 
--        // In SRT mode, buffer tokens and print the whole entry via format_srt_line.
--        // In normal mode, stream tokens directly (original behavior, no per-segment newline).
--        std::string seg_text;
--        llama_token tk=llama_sampler_sample(smpl,ctx,-1);
--        for(int i=0;i<npred;i++){
--            if(llama_vocab_is_eog(vocab,tk))break;
--            char buf[256]; int k=llama_token_to_piece(vocab,tk,buf,sizeof(buf),0,true);
--            if(k>0){
--                seg_text.append(buf, k);
+             }
+-        } else {
+-            printf("%s", seg_text.c_str());
++
 +            if(srt_mode){
 +                if (seg_text != "/sil") {
 +                    srt_idx++;
@@ -164,20 +191,15 @@ index 7d0929f..c2c8bec 100644
 +                }
 +            } else {
 +                out += seg_text;
-             }
--            decode_batch(ctx,1,&tk,nullptr,0,n_past,true);
--            tk=llama_sampler_sample(smpl,ctx,-1);
++            }
          }
+-        fflush(stdout);
 +        if(!srt_mode) out += "\n";
 +        int64_t t2f=ggml_time_us();
 +        fprintf(stderr,"[done] %.2fs ; chunk=%.0fs\n",(t2f-t0f)/1e6, chunk_sec);
 +        return true;
 +    };
- 
--        if(srt_mode){
--            if (seg_text != "/sil") {
--                srt_idx++;
--                format_srt_line(srt_idx, start_ms, end_ms, seg_text);
++
 +    if(server_mode){
 +        printf("READY\n"); fflush(stdout);
 +        char line[8192];
@@ -192,12 +214,9 @@ index 7d0929f..c2c8bec 100644
 +            } else {
 +                std::string b=b64encode(p.data(),p.size());
 +                printf("ERR %s\n",b.c_str());
-             }
--        } else {
--            printf("%s", seg_text.c_str());
++            }
 +            fflush(stdout);
-         }
--        fflush(stdout);
++        }
 +    } else {
 +        std::string text;
 +        if(!transcribe_path(wav_path.c_str(),text)){fprintf(stderr,"failed to read audio\n");return 1;}

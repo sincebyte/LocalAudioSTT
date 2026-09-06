@@ -42,14 +42,14 @@ if [ ! -d "$SRC/.git" ]; then
   git -C "$SRC" sparse-checkout set runtime/llama.cpp
 fi
 
-echo "==> 2/4 应用 --server 补丁 (可重复执行, 幂等)"
+echo "==> 2/4 应用 --server/--prompt 补丁 (可重复执行, 幂等)"
 if git -C "$SRC" apply --check "$PATCH" 2>/dev/null; then
   git -C "$SRC" apply "$PATCH"
   echo "      已应用 patches/llama-funasr-cli.server-mode.patch"
-elif grep -q -- '--server' "$CLI_SRC"; then
+elif grep -q -- '--server' "$CLI_SRC" && grep -q -- '--prompt' "$CLI_SRC"; then
   echo "      补丁已应用过, 跳过"
 else
-  echo "错误: 补丁无法应用到 $CLI_SRC" >&2
+  echo "错误: 补丁无法应用到 $CLI_SRC (若旧树只打了 server 版补丁, 可先删除 $BUILD_DIR/FunASR 或 git checkout 该文件后重试)" >&2
   exit 1
 fi
 

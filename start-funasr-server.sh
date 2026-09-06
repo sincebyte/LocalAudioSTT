@@ -7,6 +7,7 @@
 # Usage:  ./start-funasr-server.sh
 #         FUNASR_PORT=9000 ./start-funasr-server.sh    # override port
 #         FUNASR_HOST=0.0.0.0 ./start-funasr-server.sh  # listen on all interfaces
+#         FUNASR_PROMPT='...' ./start-funasr-server.sh  # custom recognition prompt (see below)
 #
 # Endpoint: POST http://127.0.0.1:8001/v1/audio/transcriptions  (OpenAI-compatible)
 # Health:   GET  http://127.0.0.1:8001/health
@@ -26,6 +27,9 @@ ENCODER="${FUNASR_ENCODER:-$SCRIPT_DIR/gguf/funasr-encoder-f16.gguf}"
 VAD="${FUNASR_VAD:-$SCRIPT_DIR/gguf/fsmn-vad.gguf}"
 TIMEOUT="${FUNASR_TIMEOUT:-300}"
 PERSISTENT="${FUNASR_PERSISTENT:-1}"   # keep the model resident (1) or spawn per request (0)
+# 可选: 自定义提示词/词表, 替换默认的 "语音转写:", 用于向解码器注入指令词偏置(方案A)。
+# 例: FUNASR_PROMPT='语音转写, 可能出现的指令词: CLEAR、发送、上一条' ./start-funasr-server.sh
+PROMPT="${FUNASR_PROMPT:-}"
 LOG_FILE="${FUNASR_LOG_FILE:-$SCRIPT_DIR/funasr-server/server.log}"
 
 for f in "$BINARY" "$MODEL" "$ENCODER" "$VAD"; do
@@ -52,12 +56,21 @@ echo "  model  : $MODEL"
 echo "  encoder: $ENCODER"
 echo "  vad    : $VAD"
 echo "  mode   : $([ "$PERSISTENT" = "1" ] && echo "常驻内存(persistent)" || echo "每请求拉起子进程(oneshot)")"
+if [ -n "$PROMPT" ]; then
+  echo "  prompt : $PROMPT"
+else
+  echo "  prompt : (默认) 语音转写："
+fi
 echo "  log    : $LOG_FILE"
 
 : > "$LOG_FILE"
 PERSISTENT_FLAG=""
 if [ "$PERSISTENT" = "1" ]; then
   PERSISTENT_FLAG="--persistent"
+fi
+PROMPT_ARGS=()
+if [ -n "$PROMPT" ]; then
+  PROMPT_ARGS=(--prompt "$PROMPT")
 fi
 # nohup 在无控制终端的上下文(SSH/agent/面板)会报 "can't detach from console" 并导致后台进程被杀,
 # 改用 < /dev/null + disown: 真实终端与无 tty 环境都能稳定后台运行。
@@ -69,6 +82,7 @@ python3 "$SCRIPT_DIR/funasr-server/funasr_gguf_server.py" \
   --vad "$VAD" \
   --extra-arg "--enc $ENCODER" \
   --timeout "$TIMEOUT" \
+  "${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"}" \
   $PERSISTENT_FLAG \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 SERVER_PID=$!
