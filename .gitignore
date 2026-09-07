@@ -4,6 +4,7 @@ gguf
 
 # 本机编译/下载的执行文件, 不要上传 git (需源码编译或从上游 Releases 下载)
 llama-funasr-*
+llama-server
 
 # cmake 构建产物目录
 .build/

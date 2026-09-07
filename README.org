@@ -77,6 +77,43 @@ clang --version
 ./llama-funasr-cli --help 2>&1 | grep -- --server
 #+END_SRC
 
+*llm 档整理模型（仅 =FUNASR_ORGANIZER=llm= 或手动整理接口需要）
+
+=llm= 档整理需要一个 **通用 chat 模型**：Fun-ASR 调优版的
+Qwen3（=qwen3-0.6b-q8_0.gguf=/q5km，用于语音转写）遇到纯文本请求会直接结束，无法做排版。
+所以整理用的是同一个 llama.cpp 的 **=llama-server=** 进程，默认加载
+=gguf/qwen3-0.6b-chat-q8_0.gguf= （通用 Qwen3 聊天版量化为 Q8_0，速度快；实测数百字整理约 2~4 秒）。
+
+*准备通用聊天模型（一次即可）*
+
+从 Qwen 官方 HF 仓库下载 =Qwen3-0.6B= 的 BF16 GGUF 放到 =gguf/Qwen3-0.6B-BF16.gguf=，
+再用编译出的 =llama-quantize= 量化一份快的 Q8_0 版本（默认优先用它）：
+
+#+BEGIN_SRC bash
+cmake --build .build/build-llama-server -j --target llama-quantize
+.build/build-llama-server/bin/llama-quantize \
+  gguf/Qwen3-0.6B-BF16.gguf gguf/qwen3-0.6b-chat-q8_0.gguf Q8_0
+#+END_SRC
+
+没有 Q8 版时 =start-funasr-server.sh= 会自动回退到 BF16（更慢）；也可用
+=FUNASR_REFORMAT_GGUF= 指定别的文件。
+
+*编译 llama-server（仅 llm 档需要）*
+
+=llama-server= 不是 FunASR 分支编译的，直接从上面编译时拉取的 llama.cpp 源码单独编一个：
+
+#+BEGIN_SRC bash
+cmake -S .build/build-runtime/_deps/llama-src -B .build/build-llama-server \
+  -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_SERVER=ON \
+  -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_COMMON=ON -DLLAMA_BUILD_TOOLS=ON \
+  -DLLAMA_BUILD_HTML=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_CURL=OFF
+cmake --build .build/build-llama-server -j --target llama-server
+cp .build/build-llama-server/bin/llama-server ./llama-server
+#+END_SRC
+
+不需要网页 UI 也可关闭：若链接报缺 UI 资产，把上面 `-DLLAMA_BUILD_UI=OFF` 换成 `-DLLAMA_USE_PREBUILT_UI=ON` 重配再编。
+产物 =llama-server= 不随 git 分发（已在 .gitignore 排除）。
+
 ** 启动
 
 确保以下文件存在：
@@ -85,6 +122,8 @@ clang --version
 - =gguf/qwen3-0.6b-q5km.gguf=
 - =gguf/funasr-encoder-f16.gguf=
 - =gguf/fsmn-vad.gguf=
+- =llama-server= ← 仅 llm 档/手动整理需要，按上节编译（默认 rule 档不拉取）
+- =gguf/qwen3-0.6b-chat-q8_0.gguf= ← 通用 Qwen3 聊天模型（llm 档用；缺则自动回退 BF16）
 
 缺执行文件的话，先按上节「编译 llama-funasr-cli」编译；缺模型的话，直接按 上文地址从 HuggingFace 下载到 =gguf/= 目录。
 
@@ -118,6 +157,42 @@ curl http://127.0.0.1:8001/v1/audio/transcriptions \
 #+BEGIN_SRC bash
 kill <脚本输出的 PID>
 #+END_SRC
+
+** 自动排版（转写接口直接返回整理结果）
+
+=POST /v1/audio/transcriptions= **一步到位**：语音转成文字后，按整理档位
+（=FUNASR_ORGANIZER=）处理并直接返回；末尾补一个空行，让连续两段语音插入输入框时呈现
+明显段落隔断。默认 **=rule= 档**：
+
+- =none=：只返回原始转写（做 /sil 清理与段间换行），不整理。
+- =rule=：本地确定性整理，**不调用任何大模型**——把行首干净的枚举词（第X点/一、等）
+  归一为编号行（`1. …`）。转写只用语音模型一次推理，也不拉起 llama-server。
+- =llm=：智能校对整理——按语义修正口误（说错又纠正时只保留最后正确说法）、删除"嗯/啊/呃/那个/就是/然后"等口头语、不强行编号、整理成通顺书面文本；保持原语言不翻译，若模型把中文"改写"成英文（幻觉）会自动回退原文；由通用 chat 模型完成。质量最高，但需要 llama-server 与通用模型（=FUNASR_ORGANIZER=llm ./start-funasr-server.sh=）。
+
+语音模型（Fun-ASR 调优版）无法处理纯文本，所以 =llm= 档与手动整理接口需要
+=start-funasr-server.sh= 拉起的 =llama-server= （加载通用 Qwen3-0.6B chat，Q8_0 默认），
+接口内部自动转发到它的 /v1/chat/completions；仅 =llm= 档或 =FUNASR_REFORMAT=1= 时才拉起该进程。
+=rule=/=none= 档不依赖它；整理后端缺失或失败都会自动退回原文，不影响转写本身。
+
+=POST /v1/text/reformat= 仍保留，供把**一大段累积文本**手动整理（需 llama-server 在线，
+即 llm 档或 =FUNASR_REFORMAT=1= 启动）：
+
+#+BEGIN_SRC bash
+curl http://127.0.0.1:8001/v1/text/reformat \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "我说一下第一点要买牛奶第二点要交水电费另外还有一件事明天下午三点开会"}'
+#+END_SRC
+
+响应： ={"text": "整理后的文本"}= （调用方用返回结果**整体替换**输入框内容）。
+
+- 识别提示词（语音转文字阶段）缺省模板覆盖：语言范围（只中英、中文为主）、英文单词按原文输出、
+  自动加中文标点、结合上下文纠正同音错别字；不做序号相关要求；
+  可 =FUNASR_PROMPT='你的提示词' ./start-funasr-server.sh= 整体替换。
+- llm 档自定义排版指令：=FUNASR_REFORMAT_PROMPT='你的排版要求'=；单次整理请求可在 JSON 里带 =prompt= 覆盖。
+- 排版模型/端口可改：=FUNASR_REFORMAT_GGUF=、=FUNASR_REFORMAT_PORT=、=FUNASR_REFORMAT_MODEL=。
+- =llm= 档请求带 =reasoning_effort=none= 关闭思考，数百字整理约 1~3 秒。
+- 局限：=rule= 档无法拆"无标点连读"的枚举列表，也不会删口头语/改口误（只有 llm 档会）；
+  =llm= 档 0.6B 属"尽力而为"，复杂长句的语义修正偶有不到位。要更稳可换更大的 chat GGUF。
 
 ** 在 OpenChamber 里使用
 

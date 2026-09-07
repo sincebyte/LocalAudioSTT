@@ -9,6 +9,17 @@ By default each request spawns a fresh CLI subprocess (one-shot; simplest, but
 reloads ~1GB of models every time). With --persistent the server keeps a single
 long-lived `llama-funasr-cli --server` worker alive so the models stay resident
 in memory and per-request latency drops to roughly the pure inference time.
+
+POST /v1/audio/transcriptions already returns the *organized* text in one shot:
+the raw transcript is auto-run through a whole-buffer reorganization pass
+(Feishu-style numbering / blank lines / numeral normalization) and a trailing
+blank line is appended, so consecutive voice inserts read as separate
+paragraphs. The reorganization needs a *general* chat model, not the
+Fun-ASR-tuned one used for audio, so it is forwarded to a separate llama.cpp
+llama-server (--reformat-url) hosting e.g. a stock Qwen3-0.6B GGUF.
+
+POST /v1/text/reformat stays available for manually reorganizing a larger
+accumulated buffer in one call.
 """
 
 from __future__ import annotations
@@ -25,11 +36,143 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
+import sys
 import tempfile
 import threading
 from typing import Iterable, Optional
+from urllib import request as urllib_request
 from urllib.parse import urlparse
+from urllib.error import HTTPError
+
+
+# Default system instruction for /v1/text/reformat. The Fun-ASR-tuned Qwen3
+# used for transcription cannot follow pure-text instructions (it stops
+# immediately), so this runs on the general chat model at --reformat-url.
+#
+# Goal: turn raw speech-to-text into clean, correct, readable text - drop
+# self-corrections and filler words, and do NOT force any numbering.
+DEFAULT_REFORMAT_PROMPT = (
+    "你是语音转写的校对整理助手。用户给的是口语转写原文，请把它整理成通顺、简洁、正确的书面文本：\n"
+    "1) 口误修正：说话人说错后又纠正的（如“一二三四，不对不对，是四五六”“哦说错了，是……”“应该是……”），"
+    "只保留最后纠正的正确说法，删掉被否定的错词以及“不对”“说错了”等修正语；\n"
+    "2) 删除口头语：删掉没有信息量、明显冗余的“嗯、啊、呃、那个、这个、就是说、就是、然后、对不对、对吧、基本上”等"
+    "填充词和无意义重复；\n"
+    "3) 不要自己造序号或编号，也不要给文本强行分段编号；说话人自己说的“第一/第二”等按其原意保留在句子里即可；\n"
+    "4) 标点和措辞按书面规范整理，句子合并或拆分以读起来通顺为准；人名、地名、数字、单位尽量准确；\n"
+    "5) 不添加原文没有的事实、不遗漏实质内容；\n"
+    "6) 只输出整理后的文本，不要解释，也不要复述本指令；\n"
+    "7) 保持与原文相同的语言：中文原文就输出中文、英文原文就输出英文，"
+    "不要翻译、不要改写语言，也不要在结果前加“好的”“Sure! Here's…”之类的开场白，直接给出整理后的文本。"
+)
+
+# Distinctive phrases that only ever come from the instruction itself. If two or
+# more appear in a reply, the model echoed the rules instead of organizing input.
+_INSTRUCTION_MARKERS = (
+    "语音转写的校对整理助手",
+    "口误修正",
+    "删除口头语",
+    "填充词",
+    "不要复述本指令",
+    "不要解释",
+    "口语转写原文",
+    "修正语",
+    "按书面规范整理",
+    "不添加原文没有的事实",
+)
+
+# Qwen3 thinking models emit a <think>...</think> block before the answer.
+_THINK_RE = re.compile(r"^<think>.*?</think>\s*", re.DOTALL)
+
+# Inputs shorter than this are not sent to the llm organizer (too little to
+# clean; the 0.6B model would otherwise just parrot the instruction back).
+REFORMAT_MIN_LENGTH = 12
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", s)
+
+
+# Organizer modes for the text returned by /v1/audio/transcriptions:
+#   none - raw transcript only (no reorganization at all)
+#   rule - deterministic local formatting, no second model call
+#   llm  - full reorganization through the general chat model
+ORGANIZER_VALUES = ("none", "rule", "llm")
+
+# Line-initial Chinese ordinals that organize_by_rule turns into numbered lines.
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_HEAD_CN_ORDINAL_RE = re.compile(r"^第\s*([一二三四五六七八九十]|[0-9]+)\s*[点条项部分]")
+_HEAD_CN_PUNCT_RE = re.compile(r"^([一二三四五六七八九十])\s*[、.．]")
+
+
+def _to_arabic(num: str) -> str:
+    if num.isdigit():
+        return str(int(num))
+    if num in _CN_DIGITS:
+        return str(_CN_DIGITS[num])
+    return num
+
+
+def organize_by_rule(text: str) -> str:
+    """Deterministic, model-free formatting of one transcription request.
+
+    Only rewrites clean line-initial enumeration markers into numbered lines
+    (第X点/一、... -> "N. ..."); everything else is left untouched. This cannot
+    split unpunctuated run-on lists - that is the known trade-off for skipping
+    the language model.
+    """
+    if not text.strip():
+        return text
+    lines_out = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _HEAD_CN_ORDINAL_RE.match(line)
+        if match:
+            head = _to_arabic(match.group(1))
+            rest = line[match.end():]
+            line = f"{head}. {rest}".rstrip()
+        else:
+            match = _HEAD_CN_PUNCT_RE.match(line)
+            if match:
+                head = _to_arabic(match.group(1))
+                rest = line[match.end():]
+                line = f"{head}. {rest}".rstrip()
+        lines_out.append(line)
+    return "\n".join(lines_out)
+
+
+def _effective_organizer(config: "ServerConfig") -> str:
+    """Resolve the organizer to run for transcription.
+
+    'llm' needs a configured chat backend; without one it degrades to 'rule' so
+    transcription never depends on the optional reformat server.
+    """
+    if config.organizer == "llm" and not config.reformat_url:
+        return "rule"
+    return config.organizer
+
+
+def _looks_like_instruction_echo(result: str, system: str) -> bool:
+    """True when the model parroted the instruction instead of organizing input."""
+    compact = _norm(result)
+    if len(compact) < 8:
+        return False
+    # Exact lead of the instruction copied verbatim.
+    probe = _norm(system)[:16]
+    if bool(probe) and probe in compact:
+        return True
+    # The model often drops the opening line and re-emits the numbered rules
+    # instead, so match on several instruction-only phrases.
+    return sum(1 for marker in _INSTRUCTION_MARKERS if _norm(marker) in compact) >= 2
+
+
+def strip_thinking(text: str) -> str:
+    """Remove a leading Qwen3-style <think>...</think> reasoning block."""
+    return _THINK_RE.sub("", text, count=1)
 
 
 @dataclass(frozen=True)
@@ -39,6 +182,11 @@ class ServerConfig:
     vad: Optional[str] = None
     backend: Optional[str] = None
     prompt: Optional[str] = None
+    organizer: str = "rule"
+    reformat_url: Optional[str] = None
+    reformat_model: str = "qwen3-0.6b"
+    reformat_prompt: Optional[str] = None
+    reformat_timeout: float = 300.0
     extra_args: list[str] = field(default_factory=list)
     work_dir: str = field(default_factory=tempfile.gettempdir)
     timeout: float = 600.0
@@ -83,6 +231,126 @@ def transcribe_file(config: ServerConfig, audio_path: str) -> str:
         timeout=config.timeout,
     )
     return extract_transcript(completed.stdout)
+
+
+def _chat_completion(config: ServerConfig, system: str, user: str) -> str:
+    """Call the configured llama-server (OpenAI /v1/chat/completions)."""
+    if not config.reformat_url:
+        raise RuntimeError(
+            "no --reformat-url configured for /v1/text/reformat; start the "
+            "reformat llama-server (see start-funasr-server.sh / README)"
+        )
+    url = config.reformat_url.rstrip("/") + "/chat/completions"
+    # Output should stay close to the input length; cap generation so a
+    # repetition/echo loop cannot run away and stall the request.
+    max_tokens = max(128, min(1536, int(len(user) * 1.6) + 96))
+    body = json.dumps(
+        {
+            "model": config.reformat_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+            "reasoning_effort": "none",
+            "max_tokens": max_tokens,
+            "stream": False,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib_request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=config.reformat_timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"reformat upstream {url} -> HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"reformat upstream {url} failed: {exc}") from exc
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"unexpected reformat upstream payload: {payload!r}") from exc
+    if not isinstance(content, str):
+        raise RuntimeError("reformat upstream returned non-string content")
+    return content
+
+
+# A numbered line with nothing after the number (empty bullet the model can emit).
+_EMPTY_NUMBER_LINE_RE = re.compile(r"^[0-9一二三四五六七八九十]+\s*[.、．]\s*$")
+
+
+def sanitize_organized(text: str) -> str:
+    """Clean reorganization output: drop empty numbered lines and collapse
+    repeated blank lines, so a run of blank bullets never reaches the caller."""
+    lines = text.split("\n")
+    out: list[str] = []
+    prev_blank = False
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            if out and not prev_blank:
+                out.append("")
+                prev_blank = True
+            continue
+        prev_blank = False
+        if _EMPTY_NUMBER_LINE_RE.match(line):
+            continue
+        out.append(line)
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out)
+
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+
+
+def _is_language_drift(source: str, result: str) -> bool:
+    """True when a mostly-Chinese transcript came back rewritten in English.
+
+    The general chat model sometimes 'improves' short/noisy text into a fluent
+    English rewrite ("Sure! Here's the revised text..."). That is fabrication,
+    not organizing, so it must fall back to the original transcript.
+    """
+    src_cjk = len(_CJK_RE.findall(source))
+    src_en = len(_ASCII_LETTER_RE.findall(source))
+    src_sig = src_cjk + src_en
+    if src_sig < 6 or src_cjk < src_en:
+        return False  # source is English/balanced - no Chinese to protect
+    out_cjk = len(_CJK_RE.findall(result))
+    out_en = len(_ASCII_LETTER_RE.findall(result))
+    out_sig = out_cjk + out_en
+    if out_sig < 6:
+        return False
+    return out_cjk == 0 or out_en >= out_sig * 0.6
+
+
+def reformat_text_via_chat(config: ServerConfig, text: str, prompt: Optional[str]) -> str:
+    """Whole-buffer reorganization through the general chat model.
+
+    Returns text with a leading Qwen3 <think> block stripped, if present.
+    Inputs without listable structure, instruction echoes and language-drift
+    (Chinese rewritten into English) all fall back to the original.
+    """
+    if len(_norm(text)) < REFORMAT_MIN_LENGTH:
+        return text
+    system = prompt or config.reformat_prompt or DEFAULT_REFORMAT_PROMPT
+    result = sanitize_organized(strip_thinking(_chat_completion(config, system, text)))
+    if not result.strip() or _looks_like_instruction_echo(result, system):
+        return text
+    if _is_language_drift(text, result):
+        print("[reformat] language drift detected (Chinese -> English rewrite), returned original",
+              file=sys.stderr, flush=True)
+        return text
+    return result
+
+
+def _strip_sil(text: str) -> str:
+    """Drop the '/sil' placeholder the decoder emits for silence/noise segments."""
+    return text.replace("/sil", "")
 
 
 class PersistentTranscriber:
@@ -279,7 +547,11 @@ class FunASRGGUFHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not found"))
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/v1/audio/transcriptions":
+        path = urlparse(self.path).path
+        if path == "/v1/text/reformat":
+            self._handle_reformat()
+            return
+        if path != "/v1/audio/transcriptions":
             self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not found"))
             return
 
@@ -323,7 +595,66 @@ class FunASRGGUFHandler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     pass
 
-        self._send_json(HTTPStatus.OK, _json_bytes({"text": transcript}))
+        self._send_json(HTTPStatus.OK, _json_bytes({"text": self._finalize_transcription(transcript)}))
+
+    def _finalize_transcription(self, transcript: str) -> str:
+        """Raw ASR text -> text returned by /v1/audio/transcriptions.
+
+        Applies the configured organizer so callers get the reorganized version
+        in a single request:
+          none - raw transcript
+          rule - deterministic local formatting (no second model call)
+          llm  - full reorganization through the general chat model
+        A trailing blank line is always appended so consecutive voice inserts
+        read as separate paragraphs.
+        """
+        text = _strip_sil(transcript)
+        organizer = _effective_organizer(self.config)
+        if organizer == "llm":
+            try:
+                organized = reformat_text_via_chat(self.config, transcript, None)
+                if organized.strip():
+                    text = organized
+            except Exception:
+                pass  # never let a formatting failure break transcription
+        elif organizer == "rule":
+            text = organize_by_rule(text)
+        if not text.strip():
+            return ""
+        return text.rstrip("\n") + "\n\n"
+
+    def _handle_reformat(self) -> None:
+        """POST /v1/text/reformat — whole-buffer reorganization.
+
+        Request:  {"text": "<accumulated raw transcript>", "prompt": "<optional>"}
+        Response: {"text": "<reorganized transcript>"}
+
+        Runs on the general chat model behind --reformat-url (the Fun-ASR-tuned
+        audio model stops immediately on pure text). The caller replaces its
+        whole buffer with the returned text.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("missing non-empty string field: text")
+            prompt = payload.get("prompt")
+            if prompt is not None and not isinstance(prompt, str):
+                raise ValueError("field 'prompt' must be a string")
+            result = reformat_text_via_chat(self.config, text, prompt)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, _error_payload(str(exc)))
+            return
+        except RuntimeError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, _error_payload(str(exc)))
+            return
+        except Exception as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, _error_payload(str(exc)))
+            return
+        if not result.strip():
+            result = text  # never degrade: fall back to the original
+        self._send_json(HTTPStatus.OK, _json_bytes({"text": result}))
 
 
 class FunASRHTTPServer(ThreadingHTTPServer):
@@ -357,6 +688,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "default user instruction ('语音转写：') with a custom hint, e.g. a command "
         "word list, to bias recognition. Applied to every request.",
     )
+    parser.add_argument(
+        "--organizer",
+        choices=ORGANIZER_VALUES,
+        default="rule",
+        help="How the text returned by /v1/audio/transcriptions is organized: "
+        "'none' (raw), 'rule' (local deterministic formatting, no extra model "
+        "call; default), or 'llm' (full reorganization via --reformat-url). "
+        "'llm' without a --reformat-url falls back to 'rule'.",
+    )
+    parser.add_argument(
+        "--reformat-url",
+        help="Base URL of a llama.cpp llama-server (OpenAI /v1 style, e.g. "
+        "http://127.0.0.1:8082/v1) hosting a general chat model. Enables "
+        "POST /v1/text/reformat (the Fun-ASR-tuned audio model cannot follow "
+        "pure-text instructions).",
+    )
+    parser.add_argument(
+        "--reformat-model",
+        default="qwen3-0.6b",
+        help="Model id sent in the chat-completion request to --reformat-url.",
+    )
+    parser.add_argument(
+        "--reformat-prompt",
+        help="Optional system instruction overriding the built-in default used by "
+        "POST /v1/text/reformat (unless a request supplies its own 'prompt').",
+    )
+    parser.add_argument("--reformat-timeout", type=float, default=300.0)
     parser.add_argument("--work-dir", default=tempfile.gettempdir(), help="Directory for temporary uploaded audio files.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-request subprocess timeout in seconds.")
     parser.add_argument(
@@ -385,6 +743,11 @@ def main() -> None:
             vad=args.vad,
             backend=args.backend,
             prompt=args.prompt,
+            organizer=args.organizer,
+            reformat_url=args.reformat_url,
+            reformat_model=args.reformat_model,
+            reformat_prompt=args.reformat_prompt,
+            reformat_timeout=args.reformat_timeout,
             extra_args=_parse_extra_args(args.extra_arg),
             work_dir=args.work_dir,
             timeout=args.timeout,
@@ -398,13 +761,28 @@ def main() -> None:
         vad=args.vad,
         backend=args.backend,
         prompt=args.prompt,
+        organizer=args.organizer,
+        reformat_url=args.reformat_url,
+        reformat_model=args.reformat_model,
+        reformat_prompt=args.reformat_prompt,
+        reformat_timeout=args.reformat_timeout,
         extra_args=_parse_extra_args(args.extra_arg),
         work_dir=args.work_dir,
         timeout=args.timeout,
         transcriber=transcriber,
     )
     httpd = create_server(args.host, args.port, config)
-    print(f"Serving FunASR GGUF transcription on http://{args.host}:{httpd.server_port}")
+    print(f"Serving FunASR GGUF transcription on http://{args.host}:{httpd.server_port}", flush=True)
+    print(f"organizer: {config.organizer}", flush=True)
+    print("==== reformat-prompt-begin ====", flush=True)
+    print(config.reformat_prompt or DEFAULT_REFORMAT_PROMPT, flush=True)
+    print("==== reformat-prompt-end ====", flush=True)
+    if config.reformat_url:
+        print(
+            f"Text reformat (/v1/text/reformat) proxied to {config.reformat_url} "
+            f"(model {config.reformat_model})",
+            flush=True,
+        )
     httpd.serve_forever()
 
 
