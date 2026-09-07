@@ -46,6 +46,18 @@ from urllib import request as urllib_request
 from urllib.parse import urlparse
 from urllib.error import HTTPError
 
+try:
+    from itn_digits import normalize_chinese_digits
+except ImportError:  # pragma: no cover - module co-located in this package
+    def normalize_chinese_digits(text: str) -> str:  # type: ignore[misc]
+        return text
+
+try:
+    from command_canon import normalize_commands
+except ImportError:  # pragma: no cover - module co-located in this package
+    def normalize_commands(text: str) -> str:  # type: ignore[misc]
+        return text
+
 
 # Default system instruction for /v1/text/reformat. The Fun-ASR-tuned Qwen3
 # used for transcription cannot follow pure-text instructions (it stops
@@ -53,33 +65,31 @@ from urllib.error import HTTPError
 #
 # Goal: turn raw speech-to-text into clean, correct, readable text - drop
 # self-corrections and filler words, and do NOT force any numbering.
+# It is copy-editing, not summarization: every sentence must stay, verbatim
+# in meaning and order.
 DEFAULT_REFORMAT_PROMPT = (
-    "你是语音转写的校对整理助手。用户给的是口语转写原文，请把它整理成通顺、简洁、正确的书面文本：\n"
-    "1) 口误修正：说话人说错后又纠正的（如“一二三四，不对不对，是四五六”“哦说错了，是……”“应该是……”），"
-    "只保留最后纠正的正确说法，删掉被否定的错词以及“不对”“说错了”等修正语；\n"
-    "2) 删除口头语：删掉没有信息量、明显冗余的“嗯、啊、呃、那个、这个、就是说、就是、然后、对不对、对吧、基本上”等"
-    "填充词和无意义重复；\n"
-    "3) 不要自己造序号或编号，也不要给文本强行分段编号；说话人自己说的“第一/第二”等按其原意保留在句子里即可；\n"
-    "4) 标点和措辞按书面规范整理，句子合并或拆分以读起来通顺为准；人名、地名、数字、单位尽量准确；\n"
-    "5) 不添加原文没有的事实、不遗漏实质内容；\n"
-    "6) 只输出整理后的文本，不要解释，也不要复述本指令；\n"
-    "7) 保持与原文相同的语言：中文原文就输出中文、英文原文就输出英文，"
-    "不要翻译、不要改写语言，也不要在结果前加“好的”“Sure! Here's…”之类的开场白，直接给出整理后的文本。"
+    "你是语音转写的校对整理助手，只做逐句校对排版、不做摘要，按原文保留每一句话和全部内容：\n"
+    "1) 改口误：说错又纠正的只留最后正确的说法，删“不对”“说错了”等修正语；\n"
+    "2) 删口头语：删“嗯、啊、呃、那个、就是说”等没意义的填充词；\n"
+    "3) 数字一律转阿拉伯数字：三十→30、百分之二十→20%、三点半→3点半、三十五块→35块、"
+    "二〇二五→2025、第一点→第1点，单位量词保留；固定成语除外（如“不三不四”）；\n"
+    "4) 补恰当中文标点；不要加“好的”等开场白；不要复述本指令或解释；\n"
+    "语言与原文一致：中文原文输出中文、英文原文输出英文。"
 )
 
 # Distinctive phrases that only ever come from the instruction itself. If two or
 # more appear in a reply, the model echoed the rules instead of organizing input.
 _INSTRUCTION_MARKERS = (
     "语音转写的校对整理助手",
-    "口误修正",
-    "删除口头语",
-    "填充词",
+    "只做逐句校对排版",
+    "按原文保留每一句话",
+    "改口误",
+    "删口头语",
+    "数字一律转阿拉伯数字",
+    "单位量词保留",
+    "固定成语除外",
     "不要复述本指令",
-    "不要解释",
-    "口语转写原文",
-    "修正语",
-    "按书面规范整理",
-    "不添加原文没有的事实",
+    "中文原文输出中文",
 )
 
 # Qwen3 thinking models emit a <think>...</think> block before the answer.
@@ -241,9 +251,11 @@ def _chat_completion(config: ServerConfig, system: str, user: str) -> str:
             "reformat llama-server (see start-funasr-server.sh / README)"
         )
     url = config.reformat_url.rstrip("/") + "/chat/completions"
-    # Output should stay close to the input length; cap generation so a
-    # repetition/echo loop cannot run away and stall the request.
-    max_tokens = max(128, min(1536, int(len(user) * 1.6) + 96))
+    # The Qwen3 chat model may emit a <think> block before the answer, and with
+    # too small a cap the reasoning eats the whole budget and we get an empty
+    # reply. Give a generous budget (input-length scaled), then strip <think>
+    # afterwards; the echo-detection fallback still guards against runaway loops.
+    max_tokens = max(512, min(2048, int(len(user) * 2.0) + 256))
     body = json.dumps(
         {
             "model": config.reformat_model,
@@ -252,7 +264,6 @@ def _chat_completion(config: ServerConfig, system: str, user: str) -> str:
                 {"role": "user", "content": user},
             ],
             "temperature": 0,
-            "reasoning_effort": "none",
             "max_tokens": max_tokens,
             "stream": False,
         },
@@ -619,6 +630,8 @@ class FunASRGGUFHandler(BaseHTTPRequestHandler):
                 pass  # never let a formatting failure break transcription
         elif organizer == "rule":
             text = organize_by_rule(text)
+        text = normalize_chinese_digits(text)
+        text = normalize_commands(text)
         if not text.strip():
             return ""
         return text.rstrip("\n") + "\n\n"
@@ -774,10 +787,10 @@ def main() -> None:
     httpd = create_server(args.host, args.port, config)
     print(f"Serving FunASR GGUF transcription on http://{args.host}:{httpd.server_port}", flush=True)
     print(f"organizer: {config.organizer}", flush=True)
-    print("==== reformat-prompt-begin ====", flush=True)
-    print(config.reformat_prompt or DEFAULT_REFORMAT_PROMPT, flush=True)
-    print("==== reformat-prompt-end ====", flush=True)
     if config.reformat_url:
+        print("==== reformat-prompt-begin ====", flush=True)
+        print(config.reformat_prompt or DEFAULT_REFORMAT_PROMPT, flush=True)
+        print("==== reformat-prompt-end ====", flush=True)
         print(
             f"Text reformat (/v1/text/reformat) proxied to {config.reformat_url} "
             f"(model {config.reformat_model})",

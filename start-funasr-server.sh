@@ -42,9 +42,9 @@ TIMEOUT="${FUNASR_TIMEOUT:-300}"
 PERSISTENT="${FUNASR_PERSISTENT:-1}"   # keep the model resident (1) or spawn per request (0)
 # 识别提示词(语音转写阶段)模板: 覆盖 语言范围/英文识别/标点/错别字纠正。
 # 作用在音频解码前, 是弱偏置; 可直接用 FUNASR_PROMPT 整体替换。
-PROMPT="${FUNASR_PROMPT:-语音转写：说话人只会说中文和英文，以中文为主，英文单词或短语请按英文原文准确输出，不要译成中文。请为每句话加上恰当的中文标点（句号、逗号、问号等）。结合上下文纠正同音错别字，人名、地名、数字、单位尽量准确。不要输出中文和英文以外的其他语言文字。}"
+PROMPT="${FUNASR_PROMPT:你是语音转写校对助手，把口语转写逐句整理成规范的书面文本，保留每一句的原意与全部内容，删除“嗯、啊、呃、那个、就是说”等口头语，说错又纠正的只保留最后正确的说法。说话人只会说中文和英文，以中文为主。请为每句话加上恰当标点。结合上下文纠正同音错别字，人名、地名、数字、单位尽量准确。数字一律写成阿拉伯数字。注意：clear 和 发送 是指令词}"
 # 转写结果整理档位: none|rule|llm (rule 为默认, 不调文本模型)
-ORGANIZER="${FUNASR_ORGANIZER:-llm}"
+ORGANIZER="${FUNASR_ORGANIZER:-rule}"
 LOG_FILE="${FUNASR_LOG_FILE:-$SCRIPT_DIR/funasr-server/server.log}"
 
 case "$ORGANIZER" in

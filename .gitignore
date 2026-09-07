@@ -13,3 +13,11 @@ build-cuda/
 build-vulkan/
 funasr-server/*.log
 .DS_Store
+
+# Python 虚拟环境与缓存目录
+.venv*/
+venv/
+env/
+*.egg-info/
+__pycache__/
+*.py[cod]
