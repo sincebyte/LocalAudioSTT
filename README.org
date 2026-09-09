@@ -1,105 +1,164 @@
-#+TITLE: Qwen3-ASR-1.7B 本地语音转文字服务
-#+subtitle: 自包含子项目 · llama.cpp(Metal) + Qwen3-ASR-1.7B · OpenAI 兼容接口
+#+TITLE: 本地语音转文字（Qwen3-ASR 1.7B）
+#+subtitle: 用 llama.cpp 在 Mac 上离线跑 Qwen3-ASR-1.7B · OpenAI 兼容 · 全程不出本机
 #+date: <2026-09-09>
 
-* 这是什么
+* 这个项目是干嘛的
 
-在 =llama.cpp= 上以 **Qwen3-ASR-1.7B** 为核心的中英语音转文字（ASR）服务，
-提供一个 OpenAI 兼容的 =POST /v1/audio/transcriptions=。相比父项目（Fun-ASR-Nano
-0.6B）：
+一句话：把 Qwen3-ASR-1.7B 这个语音模型放到你的 Mac 上跑，然后给你一个
+OpenAI 兼容的 =POST /v1/audio/transcriptions= 接口。OpenChamber 之类支持
+OpenAI 语音接口的工具，填个 URL 就能直接用本地转写。
 
-- 引擎换成 Qwen3-ASR-1.7B（Q8_0），中英文识别质量明显更好，**不再需要**任何
-  中英文“听错词→标准词”的字典映射。中文数字→阿拉伯数字（ITN-lite）的确定性
-  规范仍保留，与旧版一致。
-- 音频由 Qwen3-ASR 自身处理（不再外挂 SAN-M 编码器 + FSMN-VAD 二进制）。
-- 保留“文本整理”层：口语填充词过滤、行首枚举编号、纯标点转写丢弃、段尾空行。
+几个它比较讨喜的点：
 
-架构：前端 → Python 包装服务(:8011) → 常驻 llama-server(Metal, :8083) 原生
-=llama.cpp= Qwen3-ASR 推理。
+- 全程离线，录音文件不出本机；
+- 不需要独立显卡——M 系芯片直接用 Metal（Apple GPU）加速，CPU 也能跑，只是慢一点；
+- 常驻后台，模型只加载一次，之后每句都是秒回；
+- 中英文一起说也没压力（30 种语言 + 22 种中文方言自动识别），标点也会自己加好。
 
-* 特性清单（保留 / 剔除）
+分工很简单：底层 llama.cpp 只负责“听懂”这件事，外面套一层很薄的 Python，
+负责把结果整理成人话再交出去。各管各的，各不互相拖累。
 
-保留：
-- =POST /v1/audio/transcriptions=（multipart =file=）+ =GET /health=
-- =organizer=：=rule=（默认）口语词清理+枚举编号；=none=（仅去引擎标记的原文）
-- 中文数字→阿拉伯数字（ITN-lite，同旧版：三十五→35、百分之三十→30%、
-  三点半→3点半；依赖 =pip install cn2an=，未装则原样输出）
-- **指令词确定性映射（发送 / clear）**：即使模型把它们听成 发松/法送/可丽儿/
-  Claire/claer/C L E A R…，也统一归一到精确的 发送/clear，保证这两个指令永远
-  明确可识别；词表在 =server/command_aliases.json=（手工维护，运行中改动即时生效，
-  无需重启）。通用词汇（org/emacs/funasr…）刻意不映射。
-- 纯标点/无正文转写 → 返回空
-- 连续语音每段自动段尾空行
-- Qwen3-ASR 输出前缀 =language …<asr_text>= 的剥离、=/sil= 清理（防御）
+* 默认就帮你做好的几件事
 
-剔除（有意为之，Qwen3-ASR 不需要）：
-- 指令词/专用词 别名→标准词 字典映射（父项目 =command_aliases.json=/=command_canon.py=）
+每次转写返回前，会自动做这几步清理（这也是这套服务真正省心的地方）：
 
-* 快速开始
+1. **说话时的口头语会被删掉**——嗯、啊、呃、那个、就是说这类，包括粘在字
+   上的“呃飞猪”这种连读残留也能处理。
+2. **中文数字自动转阿拉伯数字**：三十五→35、三点半→3点半、百分之三十→30%、
+   二〇二五年三月五号→2025年3月5号。（需要 =pip install cn2an=，没装也不影响
+   其它功能，只是数字这步原样输出。）
+3. **“发送”和“clear”这两个指令词会被特别照顾**。一方面提示词里告诉模型它
+   俩是指令、要单独成句；另一方面万一还是被听岔了（发松、法送、可丽儿、
+   Claire、C L E A R 逐字母念……），还有一张小词典把它们拉回标准的 发送/clear，
+   保证这两个词永远明确可认。词典在 =server/command_aliases.json=，你可以随手
+   往里加自己实测出来的新写法，改完立刻生效，不用重启。
+4. 模型输出的 =language Chinese<asr_text>= 这类前缀会被剥掉，只留正文。
+5. 一段语音转完只剩个标点（或别的什么符号）这种没意义的结果，直接返回空。
+6. 每段结果末尾自动带一个空行——你连着说几句，贴进文档里就是几个段落。
 
-** 1. 编译 Metal 版 llama-server（一次）
+整理档位 =organizer= 有两个：
+
+- =rule=（默认）：做上面这些清理；
+- =none=：除了剥语言标记，别的啥都不动，要最原始的转写就选它。
+
+另外刻意**不做**的一件事：不给 org mode / emacs / FunASR 这类通用词做“听错→
+纠正”的词典替换。1.7B 本身已经够聪明，这些词听错概率很低，强行替换反而容易
+误伤正常句子。只有 发送/clear 这种“错一个字就出事”的指令词，才值得配字典。
+
+* 跑起来之前
+
+- macOS，M 系芯片最好（能吃 Metal）；
+- Xcode 命令行工具（git / cmake / clang 有就行）；
+- 硬盘剩 ~3GB（模型 2.5GB），内存 16GB 够用；
+- （可选）=pip install cn2an= 让数字转换生效。
+
+* 三步跑起来
+
+** 1. 编译一次引擎（带 Metal）
 
 #+BEGIN_SRC bash
-./build-llama-server.sh --install   # 产物落在 .deps/llama.cpp/build 与 ./bin/
+./build-llama-server.sh --install
 #+END_SRC
-（=GGML_METAL=ON=，M 系芯片 GPU 加速；结果在 =bin/llama-server=。）
 
-** 2. 下载模型（~2.5 GB）
+产物放在 =bin/llama-server=。只编这一次；以后换机器重跑一遍即可。
+（需要联网拉 llama.cpp 源码；也可以先手动放一份到 =.deps/llama.cpp= 跳过下载。）
+
+** 2. 下载模型（约 2.5 GB）
 
 #+BEGIN_SRC bash
-./download-models.sh   # ggml-org/Qwen3-ASR-1.7B-GGUF 的 Q8_0 LLM + Q8_0 mmproj
+./download-models.sh
 #+END_SRC
 
-** 3. 启动（后台常驻）
+拉的是 ggml-org 官方 Q8_0 版（主模型 + 音频投影 mmproj）。网络不稳定时脚本会
+自动断点续传、失败切镜像，放心跑。
+
+** 3. 启动
 
 #+BEGIN_SRC bash
 ./start-server.sh
 #+END_SRC
-- 服务：=http://127.0.0.1:8011/v1/audio/transcriptions=，日志 =server.log=
-- 引擎原生端点（裸转写、无整理层）：=http://127.0.0.1:8083/v1/audio/transcriptions=
-- 改端口/档位：=QASR_PORT= QASR_ENGINE_PORT= QASR_ORGANIZER=none= 等（见脚本头注释）
-- 转写提示词（上下文热词偏置，透传给引擎 =prompt= 字段）为**精简优化版**：
-  只保留语言约束（中文/英文为主）、纠错与专名准确，以及指令词逻辑——听到
-  发送/clear 时单独成句并触发断句；不再让模型“加标点/转阿拉伯数字/删口头语”
-  （这些已由 Python 层的标点输出、ITN 数字规范化与 rule 档口头语过滤确定性完成）。
-  =QASR_PROMPT=''= 可切回引擎内置默认。该提示只影响模型解码倾向，不做任何事后字典替换。
 
-验证：
+启动成功后是两个后台常驻进程，日志在 =server.log=：
+
+- 推理引擎 llama-server：http://127.0.0.1:8083
+- 对外服务（带整理层）：http://127.0.0.1:8011
+
+想停就再跑一次 =./start-server.sh=（自动重启）或按它打印的 PID =kill= 掉。
+
+验证一下：
 
 #+BEGIN_SRC bash
 curl -sf http://127.0.0.1:8011/health
-curl http://127.0.0.1:8011/v1/audio/transcriptions -F file=@/tmp/x.wav
+curl http://127.0.0.1:8011/v1/audio/transcriptions -F file=@/tmp/某段.wav
 #+END_SRC
 
-停止：再次运行脚本自动重启；或 =kill <start 输出里的两个 PID>=。
+如果你想要“原始裸转写”而不要任何整理，直接打 8083 那个端点就行。
 
-* 在 OpenChamber 里使用
+** 在 OpenChamber / debuff 里接
 
-| 字段          | 值                                   |
-|---------------+--------------------------------------|
-| 服务器 URL    | =http://127.0.0.1:8011/v1=           |
-| 模型（Model） | =qwen3-asr-1.7b=（任意，服务端不校验） |
-| API Key       | 留空或随便填                         |
+| 字段          | 值                                     |
+|---------------+----------------------------------------|
+| 服务器 URL    | =http://127.0.0.1:8011/v1=（debuff 填完整转写地址） |
+| 模型（Model） | =qwen3-asr-1.7b=（任意串，服务端不校验）  |
+| API Key       | 留空或随便填                            |
 
-* 量化说明
+* 你可能想问的几个问题
 
-- 默认 **Q8_0**（llama.cpp 官方量化，先跑通）。
-- 5-bit（=Q5_K_M=）为后续步骤：=download-models.sh= 拉 =bf16= 版 LLM 后用
-  =bin/llama-quantize= 压成 =Q5_K_M=；=mmproj= 保持官方 Q8_0。当前官方与社区
-  GGUF 仓库均未发布 Q5，需自行量化。
+- **为什么我看到的进程内存比模型文件还小？**
+  模型是 mmap 按需分页加载的，加上统一内存里 Metal 的占用是分开算的。别盯着
+  Activity Monitor 单列看，合起来算就好。引擎实测常驻大概 3GB，16G 机器没压力。
 
-* 目录结构
+- **为什么我同一段音频每次结果都一样？**
+  因为默认采样温度是 0（贪心解码）。llama.cpp 自带的默认温度 0.8 会让转写
+  每次飘一点，语音转写要的是稳定，所以这里强制 0。想恢复随机可以 QASR_TEMP=0.8。
 
-- =server/qwen3_asr_server.py= —— OpenAI 兼容 HTTP 包装 + 转发引擎
-- =server/cleanup.py= —— 标记剥离 / 枚举编号 / 空转写门控 / 段尾空行
-- =server/filler_filter.py= —— 口语填充词过滤（从父项目移植）
-- =tests/= —— 单元 + 假引擎集成测试（=pytest qwen3-asr-server/tests=）
+- **我说话快，前一句没转完又开始说下一句，会不会排队？**
+  默认开了 2 个并发槽，两句重叠也能并行处理，不会死等。注意 -c 是“总上下文、
+  被槽平分”，现在每槽 2048，够一段约 2 分钟的音频；真有超长单段再说加大。
+
+- **还能再省点内存吗？**
+  可以：QASR_PARALLEL=1 只留 1 个槽，或 QASR_CTX=2048 再把上下文砍半。
+
+- **5-bit 想再小再快一点？**
+  官方没发 Q5，但脚本留好了路：拉 bf16 版主模型，用 bin/llama-quantize 自己压
+  一个 Q5_K_M（mmproj 保持 Q8）。想试再说。
+
+- **提示词是干嘛的？**
+  启动时会给模型一段精简提示词当“偏置”，告诉它语言范围、别把指令词听岔之类。
+  默认内容每次启动都会打印出来；想换成自己的用 QASR_PROMPT=…，想完全关掉置空
+  即可（回到模型内置默认）。它只影响解码倾向，不影响返回后的文本整理。
+
+* 常用环境变量
+
+| 变量                 | 默认      | 说明                              |
+|----------------------+-----------+-----------------------------------|
+| QASR_PORT            | 8011      | 对外服务端口                      |
+| QASR_ENGINE_PORT     | 8083      | 推理引擎端口                      |
+| QASR_ORGANIZER       | rule      | none 或 rule                      |
+| QASR_PROMPT          | 见启动输出 | 转写偏置提示词，置空则用引擎默认  |
+| QASR_TEMP            | 0         | 采样温度，0=每次结果一致          |
+| QASR_PARALLEL        | 2         | 并发槽数                          |
+| QASR_CTX             | 4096      | 总上下文，被并发槽平分            |
+| QASR_NGL             | 99        | 放 GPU 的层数（Metal 全量）       |
+| QASR_THREADS         | （自动）  | 限制 CPU 线程数，一般不用动       |
+| QASR_FLASH           | auto      | FlashAttention：on/off/auto       |
+| QASR_MLOCK           | 0         | 设 1 让模型页常驻防换出（更稳）   |
+| QASR_MODEL/MMPROJ    | gguf/     | 换模型文件时指一下路径            |
+
+* 目录结构 & 想改点什么
+
+- =server/qwen3_asr_server.py= —— OpenAI 兼容包装：收音频、转发引擎、回结果
+- =server/cleanup.py= —— 整套整理管线：剥标记/口头语/枚举/数字/指令词/空转写
+- =server/filler_filter.py= —— 口语填充词过滤的具体规则
+- =server/itn_digits.py= —— 中文数字→阿拉伯（依赖 cn2an）
+- =server/command_canon.py= + =command_aliases.json= —— 发送/clear 指令词词典
+- =tests/= —— 单元 + 假引擎集成测试：=pytest tests/ -q=
+
+想调口头语规则、加指令词听岔写法，改对应文件/词典即可；词表类改动即时生效，
+不需要动模型也不用重启进程。
 
 * 备注
 
-- 常驻模式；模型加载一次。实测（M1 Pro + Metal/Q8_0）：~7s 中文语音
-  **~0.5s**（含 Python 转发与清理层；引擎原生 ~0.9s），远低于纯 CPU 预期。
-- 引擎返回自带 =language …<asr_text>= 前缀，包装服务已剥离后才进入清理管线。
-- 英文指令词实测直出效果良好：=clear / org mode / Emacs= 均准确识别；
-  =funasr= 偶被听成 =Funisir=（1.7B 已是明显进步；如仍在意可后续按需做极轻量
-  白名单修正，本项目默认不做任何字典映射）。
+- 性能参考（M1 Pro + Metal + Q8_0）：约 7 秒的中文语音，带整理层全链路 ~0.5s。
+- 模型文件（gguf/、.deps/、bin/）都在 .gitignore 里，不入 git；换机器后按上面
+  三步重建即可。
