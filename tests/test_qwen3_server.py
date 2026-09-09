@@ -97,6 +97,19 @@ def test_chinese_numerals_become_arabic():
     assert f("二〇二五年三月五号", organizer="none") == "2025年3月5号\n\n"
 
 
+def test_command_words_are_canonicalized():
+    f = cleanup.finalize_transcription
+    # Model heard them wrong -> mapped back to the exact command word.
+    assert f("发松", organizer="rule") == "发送\n\n"
+    assert f("法送一下", organizer="rule") == "发送一下\n\n"
+    assert f("可丽儿", organizer="rule") == "clear\n\n"
+    assert f("claer", organizer="rule") == "clear\n\n"
+    assert f("Claire", organizer="rule") == "clear\n\n"
+    assert f("please C L E A R now", organizer="rule") == "please clear now\n\n"
+    # General vocabulary stays untouched (no org/emacs mapping by design).
+    assert f("奥格猫抖的 org mode 配置", organizer="rule") == "奥格猫抖的 org mode 配置\n\n"
+
+
 # ---------------- HTTP integration with a fake engine ----------------
 
 
@@ -108,7 +121,7 @@ class _FakeEngineHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)  # consume body
+        self.server.last_body = self.rfile.read(length)
         body = json.dumps({"text": self.server.raw}, ensure_ascii=False).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -121,6 +134,7 @@ class _FakeEngineServer(ThreadingHTTPServer):
     def __init__(self, raw: str):
         super().__init__(("127.0.0.1", 0), _FakeEngineHandler)
         self.raw = raw
+        self.last_body = b""
 
 
 def _post_wav(port: int):
@@ -150,6 +164,27 @@ def _start_engine(raw: str) -> _FakeEngineServer:
     thread = threading.Thread(target=engine.serve_forever, daemon=True)
     thread.start()
     return engine
+
+
+def test_prompt_is_forwarded_to_engine_when_configured():
+    engine = _start_engine("language Chinese<asr_text>好")
+    cfg = server.ServerConfig(
+        engine_url=f"http://127.0.0.1:{engine.server_port}/v1",
+        prompt="MARKER123 你是语音转写校对助手",
+    )
+    httpd = server.create_server("127.0.0.1", 0, cfg)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _post_wav(httpd.server_port)
+        body = engine.last_body.decode("utf-8", "replace")
+        assert 'name="prompt"' in body
+        assert "MARKER123 你是语音转写校对助手" in body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        engine.shutdown()
+        engine.server_close()
 
 
 def test_transcription_endpoint_runs_full_pipeline():

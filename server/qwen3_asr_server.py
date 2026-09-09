@@ -41,6 +41,8 @@ class ServerConfig:
     engine_url: str = "http://127.0.0.1:8083/v1"
     engine_model: str = "qwen3-asr-1.7b"
     organizer: str = "rule"
+    prompt: str = ""   # empty -> llama.cpp's built-in ASR prompt is used
+    temperature: float = 0.0  # deterministic greedy decoding for transcription
     timeout: float = 120.0
 
 
@@ -69,6 +71,16 @@ def transcribe_via_engine(config: ServerConfig, audio_bytes: bytes, filename: st
         'Content-Disposition: form-data; name="model"\r\n\r\n'
         f"{config.engine_model}\r\n"
     ).encode()
+    if config.prompt:
+        body += f"--{boundary}\r\n".encode()
+        body += 'Content-Disposition: form-data; name="prompt"\r\n\r\n'.encode()
+        body += config.prompt.encode("utf-8")
+        body += b"\r\n"
+    # Greedy decoding: llama.cpp's default temperature is 0.8, which makes
+    # transcription nondeterministic. ASR should be stable, so force 0.0.
+    body += f"--{boundary}\r\n".encode()
+    body += 'Content-Disposition: form-data; name="temperature"\r\n\r\n'.encode()
+    body += f"{config.temperature}\r\n".encode()
     body += f"--{boundary}--\r\n".encode()
 
     request = urllib_request.Request(
@@ -201,6 +213,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="rule",
         help="none (raw transcript) or rule (filler cleanup + enumeration; default).",
     )
+    parser.add_argument(
+        "--prompt",
+        default="",
+        help="Optional transcription prompt forwarded to the engine as hotword/"
+        "context bias (OpenAI transcriptions 'prompt' field). Empty uses the "
+        "engine's built-in ASR prompt. Default set by start-server.sh.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature sent to the engine. 0.0 = deterministic "
+        "greedy (default; llama.cpp's own default 0.8 makes ASR vary).",
+    )
     parser.add_argument("--timeout", type=float, default=120.0,
                         help="Engine request timeout in seconds.")
     return parser
@@ -214,11 +240,13 @@ def main() -> None:
         engine_url=args.engine_url,
         engine_model=args.engine_model,
         organizer=args.organizer,
+        prompt=args.prompt,
+        temperature=args.temperature,
         timeout=args.timeout,
     )
     httpd = create_server(args.host, args.port, config)
     print(f"Serving Qwen3-ASR transcription on http://{args.host}:{httpd.server_port}", flush=True)
-    print(f"engine: {config.engine_url}  organizer: {config.organizer}", flush=True)
+    print(f"engine: {config.engine_url}  organizer: {config.organizer}  prompt: {'set' if config.prompt else 'default'}  temp: {config.temperature}", flush=True)
     httpd.serve_forever()
 
 

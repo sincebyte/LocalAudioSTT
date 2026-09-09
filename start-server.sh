@@ -26,9 +26,25 @@ MODEL="${QASR_MODEL:-$SCRIPT_DIR/gguf/Qwen3-ASR-1.7B-Q8_0.gguf}"
 MMPROJ="${QASR_MMPROJ:-$SCRIPT_DIR/gguf/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf}"
 ORGANIZER="${QASR_ORGANIZER:-rule}"
 NGL="${QASR_NGL:-99}"
+# 注意: -c 是"总上下文", 会被并行槽平分(parallel=2 时每槽 = CTX/2)。
+# 短句/本机 4096 总量、每槽 2048 已足够(60s 音频约 ~1k token);
+# 若要每槽都 4096, 用 CTX=8192。
 CTX="${QASR_CTX:-4096}"
-PARALLEL="${QASR_PARALLEL:-1}"   # single-user: 1 slot is enough; KV memory scales with slots*ctx
+# 并发槽: 默认 2 —— 单个麦克风但允许"上一段未转完就开始第二段"时,
+# 新请求不必排队等上一段完成(两槽并行; 总上下文不变)。
+# 纯串行且想省内存可 QASR_PARALLEL=1。
+PARALLEL="${QASR_PARALLEL:-2}"
+# 本场景(短句/单用户/Metal)可调项: 留空=用引擎默认
+THREADS="${QASR_THREADS:-}"      # e.g. 8: 显式限制 CPU 生成/批处理线程
+FLASH="${QASR_FLASH:-auto}"      # auto/on/off: Flash Attention (Metal 长 ctx 更省更稳)
+MLOCK="${QASR_MLOCK:-0}"         # 1 = --load-mode mlock: 模型页常驻防换出(略增常驻内存)
+TEMP="${QASR_TEMP:-0}"           # 采样温度: 0=贪心确定性 (llama.cpp 默认0.8会导致每次结果抖动)
 TIMEOUT="${QASR_TIMEOUT:-120}"
+# 转写提示词(精简优化版): 已去掉"删口头语/加标点/数字转阿拉伯"话术(标点由模型
+# 自然输出、口头语与数字规范化已在 rule 档/ITN 确定性完成), 保留语言约束/纠错/
+# 专名准确, 并含指令词逻辑: 听到 发送 / clear 指令词时单独成句并触发断句。
+# 置空 QASR_PROMPT='' 则用引擎内置默认 ASR 提示。
+PROMPT="${QASR_PROMPT:-语音转写：说话人只说中文和英文，以中文为主。结合上下文纠正同音错别字，人名、地名尽量准确。注意：若听到指令词“发送”或“clear”，把它作为独立的指令单独成句，并在指令词处触发断句。}"
 LOG_FILE="${QASR_LOG_FILE:-$SCRIPT_DIR/server.log}"
 
 case "$ORGANIZER" in
@@ -60,19 +76,35 @@ trap cleanup EXIT
 
 echo "启动 Qwen3-ASR-1.7B 服务 ..."
 echo "  engine : llama-server(Metal) :$ENGINE_PORT  ngl=$NGL  ctx=$CTX  parallel=$PARALLEL"
+echo "  tune   : threads=${THREADS:-(auto)}  flash=$FLASH  mlock=$MLOCK  temp=$TEMP"
 echo "  model  : $MODEL"
 echo "  mmproj : $MMPROJ"
 echo "  service: http://$HOST:$SERVICE_PORT  organizer=$ORGANIZER"
+if [ -n "$PROMPT" ]; then
+  echo "  prompt : $PROMPT"
+else
+  echo "  prompt : (空, 用引擎内置 ASR 提示)"
+fi
 echo "  log    : $LOG_FILE"
 
 # 1) Qwen3-ASR audio engine (resident llama-server).
-"$ENGINE" \
-  -m "$MODEL" \
-  --mmproj "$MMPROJ" \
-  -c "$CTX" \
-  -np "$PARALLEL" \
-  -ngl "$NGL" \
-  --host "$HOST" --port "$ENGINE_PORT" \
+ENGINE_ARGS=(
+  -m "$MODEL"
+  --mmproj "$MMPROJ"
+  -c "$CTX"
+  -np "$PARALLEL"
+  -ngl "$NGL"
+  --host "$HOST" --port "$ENGINE_PORT"
+)
+[ -n "$THREADS" ] && ENGINE_ARGS+=(-t "$THREADS")
+case "$FLASH" in
+  on|off|auto) ENGINE_ARGS+=(-fa "$FLASH") ;;
+  *) echo "错误: QASR_FLASH 只支持 on|off|auto" >&2; exit 1 ;;
+esac
+if [ "$MLOCK" = "1" ]; then
+  ENGINE_ARGS+=(--load-mode mlock)
+fi
+"$ENGINE" "${ENGINE_ARGS[@]}" \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 ENGINE_PID=$!
 PIDS+=("$ENGINE_PID")
@@ -84,6 +116,8 @@ python3 "$SCRIPT_DIR/server/qwen3_asr_server.py" \
   --port "$SERVICE_PORT" \
   --engine-url "http://$HOST:$ENGINE_PORT/v1" \
   --organizer "$ORGANIZER" \
+  --prompt "$PROMPT" \
+  --temperature "$TEMP" \
   --timeout "$TIMEOUT" \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 SERVICE_PID=$!

@@ -8,11 +8,12 @@ placeholders. Everything downstream is deterministic, model-free cleanup:
   - strip_sil      - drop /sil noise placeholders (defensive)
   - organize_by_rule - line-initial 第X点 / 一、 -> "N. " numbered lines
   - normalize_chinese_digits - Chinese numerals -> Arabic (ITN-lite, cn2an)
+  - normalize_commands - 发送/clear 指令词字典映射(误识 -> 精确指令)
   - finalize_transcription - the whole per-utterance pipeline used by the server
 
-Per design this project has NO alias/dictionary mapping (Qwen3-ASR-1.7B is
-strong enough on mixed zh/en that mis-heard-word tables are not needed), but it
-DOES keep deterministic numeral normalization like the old project.
+General vocabulary (org/emacs/funasr...) is intentionally NOT mapped - only the
+two voice commands 发送 and clear get the deterministic alias table, so they are
+always recognized unambiguously (config: server/command_aliases.json).
 """
 
 from __future__ import annotations
@@ -29,6 +30,12 @@ try:
     from itn_digits import normalize_chinese_digits
 except ImportError:  # pragma: no cover - co-located module
     def normalize_chinese_digits(text: str) -> str:  # type: ignore[misc]
+        return text
+
+try:
+    from command_canon import normalize_commands
+except ImportError:  # pragma: no cover - co-located module
+    def normalize_commands(text: str) -> str:  # type: ignore[misc]
         return text
 
 
@@ -109,6 +116,12 @@ def finalize_transcription(raw: str, organizer: str = "rule") -> str:
     # mirroring the old project: 三十五 -> 35, 百分之三十 -> 30%, 三点半 -> 3点半.
     # No-op when the optional cn2an package is not installed.
     text = normalize_chinese_digits(text)
+    # Command-word dictionary mapping (发送/clear): even if the model hears a
+    # command as 发松/法送/可丽儿/claer/C L E A R..., map it back to the exact
+    # canonical command so 发送 / clear always come out unambiguous. Config in
+    # server/command_aliases.json. General vocabulary (org/emacs/funasr...) is
+    # intentionally NOT mapped.
+    text = normalize_commands(text)
     if not has_spoken_content(text):
         return ""
     return text.rstrip("\n") + "\n\n"
