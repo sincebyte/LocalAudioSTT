@@ -58,6 +58,12 @@ except ImportError:  # pragma: no cover - module co-located in this package
     def normalize_commands(text: str) -> str:  # type: ignore[misc]
         return text
 
+try:
+    from filler_filter import filter_fillers
+except ImportError:  # pragma: no cover - module co-located in this package
+    def filter_fillers(text: str) -> str:  # type: ignore[misc]
+        return text
+
 
 # Default system instruction for /v1/text/reformat. The Fun-ASR-tuned Qwen3
 # used for transcription cannot follow pure-text instructions (it stops
@@ -364,6 +370,16 @@ def _strip_sil(text: str) -> str:
     return text.replace("/sil", "")
 
 
+def _has_spoken_content(text: str) -> bool:
+    """Whether `text` carries real speech content (letters, digits or CJK).
+
+    CJK ideographs and all alphanumerics report True via isalnum(); pure
+    punctuation/symbols (！？。…, quotes, spaces) report False, so a transcript
+    that collapsed into nothing but punctuation is treated as not spoken.
+    """
+    return any(ch.isalnum() for ch in text)
+
+
 class PersistentTranscriber:
     """Keeps one `llama-funasr-cli --server` subprocess alive so the models stay
     resident in memory across requests.
@@ -621,9 +637,17 @@ class FunASRGGUFHandler(BaseHTTPRequestHandler):
         """
         text = _strip_sil(transcript)
         organizer = _effective_organizer(self.config)
+        if organizer == "none":
+            pass  # raw transcript - no reorganization at all
+        else:
+            # Deterministic filler cleanup applies to every organized request
+            # (short dictations never reach the llm organizer, but still get
+            # 嗯/呃/那个 dropped). Runs before rule numbering / llm so a
+            # leading filler does not hide a 第一点 enumeration marker.
+            text = filter_fillers(text)
         if organizer == "llm":
             try:
-                organized = reformat_text_via_chat(self.config, transcript, None)
+                organized = reformat_text_via_chat(self.config, text, None)
                 if organized.strip():
                     text = organized
             except Exception:
@@ -632,6 +656,11 @@ class FunASRGGUFHandler(BaseHTTPRequestHandler):
             text = organize_by_rule(text)
         text = normalize_chinese_digits(text)
         text = normalize_commands(text)
+        # A transcript reduced to pure punctuation (a lone 。/！/？, or the
+        # punctuation left behind when a filler-only utterance was cleaned) is
+        # not speech content - drop it instead of sending a meaningless mark.
+        if not _has_spoken_content(text):
+            return ""
         if not text.strip():
             return ""
         return text.rstrip("\n") + "\n\n"

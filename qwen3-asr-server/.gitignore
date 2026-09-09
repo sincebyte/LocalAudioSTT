@@ -1,0 +1,6 @@
+gguf/
+*.log
+__pycache__/
+.deps/
+bin/
+.DS_Store

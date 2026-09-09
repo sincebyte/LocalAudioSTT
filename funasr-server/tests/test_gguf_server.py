@@ -300,6 +300,56 @@ def test_organize_by_rule():
     assert rule("   ") == "   "
 
 
+def test_has_spoken_content():
+    server = load_server_module()
+    c = server._has_spoken_content
+    assert not c("")
+    assert not c("！")
+    assert not c("。")
+    assert not c("。。。\n？？")
+    assert not c("  ，！？… ")
+    assert c("中")
+    assert c("三点了。")
+    assert c("clear")
+    assert c("5.0")
+    assert c("嗯")
+
+
+def test_punctuation_only_transcript_is_dropped(tmp_path):
+    server = load_server_module()
+    for raw in ("！", "。", "？？？"):
+        cfg = server.ServerConfig(
+            binary=_fake_binary(tmp_path, raw),
+            model=str(tmp_path / "m.gguf"),
+            work_dir=str(tmp_path),
+            organizer="rule",
+        )
+        httpd = _start_server(server, cfg)
+        try:
+            payload = _transcribe_json(httpd)
+            assert payload["text"] == ""
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+def test_meaningful_transcript_is_kept(tmp_path):
+    server = load_server_module()
+    cfg = server.ServerConfig(
+        binary=_fake_binary(tmp_path, "谢谢！"),
+        model=str(tmp_path / "m.gguf"),
+        work_dir=str(tmp_path),
+        organizer="rule",
+    )
+    httpd = _start_server(server, cfg)
+    try:
+        payload = _transcribe_json(httpd)
+        assert payload["text"] == "谢谢！\n\n"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_sanitize_organized():
     server = load_server_module()
     s = server.sanitize_organized
