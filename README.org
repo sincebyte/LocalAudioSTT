@@ -34,7 +34,8 @@ OpenAI 语音接口的工具，填个 URL 就能直接用本地转写。
    往里加自己实测出来的新写法，改完立刻生效，不用重启。
 4. 模型输出的 =language Chinese<asr_text>= 这类前缀会被剥掉，只留正文。
 5. 一段语音转完只剩个标点（或别的什么符号）这种没意义的结果，直接返回空。
-6. 每段结果末尾自动带一个空行——你连着说几句，贴进文档里就是几个段落。
+6. 返回纯文本，末尾不带空行——OpenChamber 听写会把长段落在停顿处切成多段再用空格
+   拼接，若每段末尾带换行，拼接后就会在段边界多出一条空行/断行。
 
 整理档位 =organizer= 有两个：
 
@@ -49,7 +50,7 @@ OpenAI 语音接口的工具，填个 URL 就能直接用本地转写。
 
 - macOS，M 系芯片最好（能吃 Metal）；
 - Xcode 命令行工具（git / cmake / clang 有就行）；
-- 硬盘剩 ~3GB（模型 2.5GB），内存 16GB 够用；
+- 硬盘剩 ~5GB（原精度 bf16 模型 4.7GB），内存 16GB 够用；
 - （可选）=pip install cn2an= 让数字转换生效。
 
 * 三步跑起来
@@ -63,13 +64,13 @@ OpenAI 语音接口的工具，填个 URL 就能直接用本地转写。
 产物放在 =bin/llama-server=。只编这一次；以后换机器重跑一遍即可。
 （需要联网拉 llama.cpp 源码；也可以先手动放一份到 =.deps/llama.cpp= 跳过下载。）
 
-** 2. 下载模型（约 2.5 GB）
+** 2. 下载模型（原精度 bf16，约 4.7 GB）
 
 #+BEGIN_SRC bash
 ./download-models.sh
 #+END_SRC
 
-拉的是 ggml-org 官方 Q8_0 版（主模型 + 音频投影 mmproj）。网络不稳定时脚本会
+拉的是 ggml-org 官方 bf16 原精度版（主模型 4.1GB + 音频投影 mmproj 0.6GB）。网络不稳定时脚本会
 自动断点续传、失败切镜像，放心跑。
 
 ** 3. 启动
@@ -106,7 +107,7 @@ curl http://127.0.0.1:8011/v1/audio/transcriptions -F file=@/tmp/某段.wav
 
 - **为什么我看到的进程内存比模型文件还小？**
   模型是 mmap 按需分页加载的，加上统一内存里 Metal 的占用是分开算的。别盯着
-  Activity Monitor 单列看，合起来算就好。引擎实测常驻大概 3GB，16G 机器没压力。
+  Activity Monitor 单列看，合起来算就好。  引擎实测常驻大概 6GB，16G 机器仍够用。
 
 - **为什么我同一段音频每次结果都一样？**
   因为默认采样温度是 0（贪心解码）。llama.cpp 自带的默认温度 0.8 会让转写
@@ -119,9 +120,9 @@ curl http://127.0.0.1:8011/v1/audio/transcriptions -F file=@/tmp/某段.wav
 - **还能再省点内存吗？**
   可以：QASR_PARALLEL=1 只留 1 个槽，或 QASR_CTX=2048 再把上下文砍半。
 
-- **5-bit 想再小再快一点？**
-  官方没发 Q5，但脚本留好了路：拉 bf16 版主模型，用 bin/llama-quantize 自己压
-  一个 Q5_K_M（mmproj 保持 Q8）。想试再说。
+- **想更小更快？**
+  换 Q8_0 量化版：把 QASR_MODEL/QASR_MMPROJ 指到 gguf/ 里的 *-Q8_0.gguf
+  （约 2.5GB，内存减半、速度约快一倍，ASR 质量差异极小）。
 
 - **提示词是干嘛的？**
   启动时会给模型一段精简提示词当“偏置”，告诉它语言范围、别把指令词听岔之类。
@@ -159,6 +160,6 @@ curl http://127.0.0.1:8011/v1/audio/transcriptions -F file=@/tmp/某段.wav
 
 * 备注
 
-- 性能参考（M1 Pro + Metal + Q8_0）：约 7 秒的中文语音，带整理层全链路 ~0.5s。
+- 性能参考（M1 Pro + Metal + bf16）：约 7 秒的中文语音，带整理层全链路 ~1s（bf16 比 Q8_0 约慢一倍）。
 - 模型文件（gguf/、.deps/、bin/）都在 .gitignore 里，不入 git；换机器后按上面
   三步重建即可。

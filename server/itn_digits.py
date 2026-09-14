@@ -268,20 +268,46 @@ _SINGLE = "零〇一二两三四五六七八九十"
 # "百分之X到百分之Y" / "百分之X" -> X%到Y% / X%
 _PERCENT_RE = re.compile(rf"百分之([{_NUM}]+)([到至])百分之([{_NUM}]+)")
 _PERCENT_SINGLE_RE = re.compile(rf"百分之([{_NUM}]+)")
-# Calendar / money units that make even a single digit a real value: 三月 -> 3月,
-# 五块钱 -> 5块钱. Multi-character numbers before these units convert too.
+# Calendar / money units that make even a single digit a real value: 三月 -> 3月.
+# Multi-character numbers before these units convert too.
 _UNIT_PASSES = (
     re.compile(rf"([{_NUM}]+?)(?=年)"),
     re.compile(rf"([{_NUM}]+?)(?=月)"),
     re.compile(rf"([{_NUM}]+?)(?=(?:日|号))"),
-    re.compile(rf"([{_NUM}]+?)(?=(?:块|块钱|元|角|毛))"),
 )
+# Currency has two shapes. Explicit money (块钱 / 元 / 角 / 毛) is unambiguous, so
+# even a lone digit converts: 一块钱 -> 1块钱, 五毛 -> 5毛. Bare 块, however, is
+# ALSO a common classifier (这一块地方 / 两块石头), so a lone digit stays
+# Chinese and only a composite numeral is treated as money: 三十五块 -> 35块,
+# 这一块 -> 这一块.
+_CURRENCY_RE = re.compile(rf"([{_NUM}]+?)(?=(?:块钱|元|角|毛))")
+_BARE_KUAI_RE = re.compile(rf"([{_NUM}]{{2,}})(?=块)")
 # An isolated single digit (a 一/三/五... not glued to another numeral or to an
 # already-digitised context). These stay Chinese. 一…九 plus 十 included.
 _ISOLATED_SINGLE_RE = re.compile(
     rf"(?<![{_NUM}点])([{_SINGLE}])(?![{_NUM}点%])"
 )
+# The engine renders an acronym + digit ("MP4") as spaced letters plus a
+# Chinese numeral: "M P 四" / "MP 四" / "MP四". Collapse the letter spacing and
+# digitize the numeral so the token reads "MP4". Only a single ASCII word or a
+# run of single letters qualifies, so neighbouring words (done MP 四) are not
+# fused. 一 is excluded because "X 一下 / X 一起 / X 一般 ..." are function
+# words, not the digit 1.
+_ACRONYM_LETTERS = r"[A-Za-z](?:\s+[A-Za-z])+|[A-Za-z]+"
+_ACRONYM_DIGIT_RE = re.compile(
+    rf"({_ACRONYM_LETTERS})\s*([零〇二两三四五六七八九十])(?![{_NUM}])"
+)
 _PH2 = "\ue001"
+
+
+def _pass_acronym_digits(text: str) -> str:
+    def sub(match: re.Match[str]) -> str:
+        letters = re.sub(r"\s+", "", match.group(1))
+        if len(letters) < 2:
+            return match.group(0)
+        return f"{letters}{_to_digits(match.group(2))}"
+
+    return _ACRONYM_DIGIT_RE.sub(sub, text)
 
 
 def _pass_percent(text: str) -> str:
@@ -299,6 +325,11 @@ def _pass_units(text: str) -> str:
     return text
 
 
+def _pass_money(text: str) -> str:
+    text = _CURRENCY_RE.sub(lambda m: _to_digits(m.group(1)), text)
+    return _BARE_KUAI_RE.sub(lambda m: _to_digits(m.group(1)), text)
+
+
 def _shield_isolated_singles(text: str, holder: _Protector) -> str:
     return _ISOLATED_SINGLE_RE.sub(holder._guard, text)  # noqa: SLF001
 
@@ -312,11 +343,14 @@ def normalize_chinese_digits(text: str) -> str:
     """
     if _cn2an is None or not text:
         return text
+    # 0. Acronym + spoken digit first (M P 四 -> MP4), before any shielding.
+    text = _pass_acronym_digits(text)
     # 1. Clock & decimal readings first (点 handling is unambiguous here).
     timed = _convert_clock_times(text)
     # 2. Percentages and calendar/money units.
     timed = _pass_percent(timed)
     timed = _pass_units(timed)
+    timed = _pass_money(timed)
     # 3. Shield fixed words (一共/一点/星期/成语), then lone single digits.
     words = _Protector()
     shielded = words.protect(timed)

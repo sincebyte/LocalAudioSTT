@@ -2,7 +2,7 @@
 # One-click start of the Qwen3-ASR-1.7B transcription service.
 #
 # Runs in the BACKGROUND:
-#   1. llama-server (Metal) hosting Qwen3-ASR-1.7B Q8_0 + mmproj  -> :ENGINE_PORT
+#   1. llama-server (Metal) hosting Qwen3-ASR-1.7B bf16 + mmproj  -> :ENGINE_PORT
 #   2. the Python OpenAI-compatible wrapper with cleanup pipeline  -> :SERVICE_PORT
 #
 #   ./start-server.sh
@@ -22,8 +22,8 @@ HOST="${QASR_HOST:-127.0.0.1}"
 SERVICE_PORT="${QASR_PORT:-8011}"
 ENGINE_PORT="${QASR_ENGINE_PORT:-8083}"
 ENGINE="${QASR_ENGINE_BIN:-$SCRIPT_DIR/bin/llama-server}"
-MODEL="${QASR_MODEL:-$SCRIPT_DIR/gguf/Qwen3-ASR-1.7B-Q8_0.gguf}"
-MMPROJ="${QASR_MMPROJ:-$SCRIPT_DIR/gguf/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf}"
+MODEL="${QASR_MODEL:-$SCRIPT_DIR/gguf/Qwen3-ASR-1.7B-bf16.gguf}"
+MMPROJ="${QASR_MMPROJ:-$SCRIPT_DIR/gguf/mmproj-Qwen3-ASR-1.7B-bf16.gguf}"
 ORGANIZER="${QASR_ORGANIZER:-rule}"
 NGL="${QASR_NGL:-99}"
 # 注意: -c 是"总上下文", 会被并行槽平分(parallel=2 时每槽 = CTX/2)。
@@ -46,6 +46,8 @@ TIMEOUT="${QASR_TIMEOUT:-120}"
 # 置空 QASR_PROMPT='' 则用引擎内置默认 ASR 提示。
 PROMPT="${QASR_PROMPT:-语音转写：说话人只说中文和英文，以中文为主。结合上下文纠正同音错别字，人名、地名尽量准确。注意：若听到指令词“发送”或“clear”，把它作为独立的指令单独成句，并在指令词处触发断句。}"
 LOG_FILE="${QASR_LOG_FILE:-$SCRIPT_DIR/server.log}"
+# 启动时间, 统一按中国标准时间 (UTC+8) 打印/落盘
+START_AT="$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S %Z')"
 
 case "$ORGANIZER" in
   none|rule) ;;
@@ -70,11 +72,13 @@ for p in "$SERVICE_PORT" "$ENGINE_PORT"; do
 done
 
 : > "$LOG_FILE"
+echo "==== 启动时间: $START_AT ====" >> "$LOG_FILE"
 PIDS=()
 cleanup() { for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 echo "启动 Qwen3-ASR-1.7B 服务 ..."
+echo "  时间   : $START_AT"
 echo "  engine : llama-server(Metal) :$ENGINE_PORT  ngl=$NGL  ctx=$CTX  parallel=$PARALLEL"
 echo "  tune   : threads=${THREADS:-(auto)}  flash=$FLASH  mlock=$MLOCK  temp=$TEMP"
 echo "  model  : $MODEL"
@@ -139,6 +143,7 @@ trap - EXIT
 if [ "$UP" = "1" ]; then
   echo
   echo "启动成功 ✓  http://$HOST:$SERVICE_PORT/v1/audio/transcriptions"
+  echo "  启动时间: $START_AT"
   echo "  engine PID $ENGINE_PID   service PID $SERVICE_PID"
   echo "  （或直接调 llama-server 原生端点 http://$HOST:$ENGINE_PORT/v1/audio/transcriptions）"
   echo "停止:  kill $ENGINE_PID $SERVICE_PID   (或再次运行本脚本自动重启)"

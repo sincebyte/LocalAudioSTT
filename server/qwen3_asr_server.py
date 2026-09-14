@@ -2,7 +2,7 @@
 """OpenAI-compatible HTTP wrapper around llama.cpp's Qwen3-ASR-1.7B server.
 
 The heavy lifting is done by a long-lived llama.cpp `llama-server` (see
-start-server.sh) that loads Qwen3-ASR-1.7B Q8_0 + mmproj and exposes its own
+start-server.sh) that loads Qwen3-ASR-1.7B bf16 + mmproj and exposes its own
 OpenAI-compatible `POST /v1/audio/transcriptions` on an internal port. This
 wrapper proxies that endpoint and runs the deterministic text-cleanup pipeline
 (spoken-filler removal, enumeration formatting, empty-transcript gating) on top,
@@ -178,7 +178,12 @@ class Qwen3ASRHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, _error_payload(str(exc)))
             return
 
-        text = finalize_transcription(raw, organizer=self.config.organizer)
+        # No trailing blank line: clients such as OpenChamber dictation join
+        # segments with a space, so a trailing newline would surface as a line
+        # break at every segment boundary. Plain text matches the OpenAI shape.
+        text = finalize_transcription(
+            raw, organizer=self.config.organizer, prompt=self.config.prompt, trailing=""
+        )
         self._send_json(HTTPStatus.OK, _json_bytes({"text": text}))
 
 

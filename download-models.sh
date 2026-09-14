@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Download the Qwen3-ASR-1.7B GGUF files used by this project into ./gguf/.
 #
-#   ./download-models.sh                 # Q8_0 LLM + Q8_0 mmproj (default, ~2.5 GB total)
+#   ./download-models.sh                 # bf16 LLM + bf16 mmproj (default, ~4.7 GB total)
 #
 # Downloads resume on rerun (-C -) and fall back to the hf-mirror.com mirror if
-# huggingface.co is unreachable. (5-bit Q5_K_M is a later step: fetch the bf16
-# pair and quantize the LLM with bin/llama-quantize; mmproj stays Q8_0.)
+# huggingface.co is unreachable. (The Q8_0 pair is half the size and ~2x faster
+# with negligible ASR quality loss: point QASR_MODEL/QASR_MMPROJ at the *-Q8_0
+# files, or swap the names below.)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,8 +33,8 @@ dl() { # rel_path
   return 1
 }
 
-dl "Qwen3-ASR-1.7B-Q8_0.gguf"
-dl "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf"
+dl "Qwen3-ASR-1.7B-bf16.gguf"
+dl "mmproj-Qwen3-ASR-1.7B-bf16.gguf"
 
 echo
 echo "完成。文件:"
