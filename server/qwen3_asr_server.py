@@ -5,8 +5,9 @@ The heavy lifting is done by a long-lived llama.cpp `llama-server` (see
 start-server.sh) that loads Qwen3-ASR-1.7B bf16 + mmproj and exposes its own
 OpenAI-compatible `POST /v1/audio/transcriptions` on an internal port. This
 wrapper proxies that endpoint and runs the deterministic text-cleanup pipeline
-(spoken-filler removal, enumeration formatting, empty-transcript gating) on top,
-so callers get clean, paragraph-separated text in one request.
+(spoken-filler removal, numeral/command normalization, trailing-punctuation
+drop, empty-transcript gating) on top, so callers get clean text in one request
+with line breaks left as-is.
 
   POST /v1/audio/transcriptions   (multipart `file` wav; `model` optional)
   GET  /health
@@ -43,6 +44,8 @@ class ServerConfig:
     organizer: str = "rule"
     prompt: str = ""   # empty -> llama.cpp's built-in ASR prompt is used
     temperature: float = 0.0  # deterministic greedy decoding for transcription
+    strip_trailing_punct: bool = True  # drop ASR end-of-segment punctuation
+    log_raw: bool = False  # log engine raw text + cleaned text (diagnostics)
     timeout: float = 120.0
 
 
@@ -178,12 +181,20 @@ class Qwen3ASRHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, _error_payload(str(exc)))
             return
 
-        # No trailing blank line: clients such as OpenChamber dictation join
-        # segments with a space, so a trailing newline would surface as a line
-        # break at every segment boundary. Plain text matches the OpenAI shape.
+        # Line breaks are the engine's own; the pipeline never adds or merges
+        # them, so paragraph layout is left to the caller / a downstream LLM.
         text = finalize_transcription(
-            raw, organizer=self.config.organizer, prompt=self.config.prompt, trailing=""
+            raw,
+            organizer=self.config.organizer,
+            prompt=self.config.prompt,
+            strip_trailing_punct=self.config.strip_trailing_punct,
         )
+        if self.config.log_raw:
+            # Raw vs cleaned, so a suspected duplicate can be traced to the
+            # engine (both show it) or to the caller (raw is clean). repr keeps
+            # newlines/whitespace visible. Diagnostics only.
+            print(f"[raw]   {filename}: {raw!r}", flush=True)
+            print(f"[clean] {filename}: {text!r}", flush=True)
         self._send_json(HTTPStatus.OK, _json_bytes({"text": text}))
 
 
@@ -232,6 +243,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Sampling temperature sent to the engine. 0.0 = deterministic "
         "greedy (default; llama.cpp's own default 0.8 makes ASR vary).",
     )
+    parser.add_argument(
+        "--strip-trailing-punct",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop the sentence-ender the ASR adds at the very end of each "
+        "pause-flushed segment, so the downstream LLM decides the final "
+        "punctuation (default on; --no-strip-trailing-punct keeps it).",
+    )
+    parser.add_argument(
+        "--log-raw",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Log each request's engine raw text and cleaned text to stderr "
+        "(goes to server.log). Diagnostics for suspected ASR duplicates; off "
+        "by default.",
+    )
     parser.add_argument("--timeout", type=float, default=120.0,
                         help="Engine request timeout in seconds.")
     return parser
@@ -247,11 +274,13 @@ def main() -> None:
         organizer=args.organizer,
         prompt=args.prompt,
         temperature=args.temperature,
+        strip_trailing_punct=args.strip_trailing_punct,
+        log_raw=args.log_raw,
         timeout=args.timeout,
     )
     httpd = create_server(args.host, args.port, config)
     print(f"Serving Qwen3-ASR transcription on http://{args.host}:{httpd.server_port}", flush=True)
-    print(f"engine: {config.engine_url}  organizer: {config.organizer}  prompt: {'set' if config.prompt else 'default'}  temp: {config.temperature}", flush=True)
+    print(f"engine: {config.engine_url}  organizer: {config.organizer}  prompt: {'set' if config.prompt else 'default'}  temp: {config.temperature}  strip_trailing_punct: {config.strip_trailing_punct}  log_raw: {config.log_raw}", flush=True)
     httpd.serve_forever()
 
 

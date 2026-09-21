@@ -9,6 +9,9 @@
 #   QASR_PORT=8021 ./start-server.sh          # override service port
 #   QASR_ENGINE_PORT=8093 ./start-server.sh   # override engine port
 #   QASR_ORGANIZER=none ./start-server.sh     # raw transcript only
+#   QASR_STRIP_TRAILING_PUNCT=0 ./start-server.sh  # keep ASR end-of-segment mark
+#   QASR_REPEAT_PENALTY=1.1 ./start-server.sh      # 抑制停顿处复读(默认)
+#   QASR_LOG_RAW=0 ./start-server.sh               # 关掉 raw/clean 诊断日志
 #   QASR_NGL=0 ./start-server.sh              # CPU-only (if not built with Metal)
 #
 # Endpoints:
@@ -40,6 +43,17 @@ FLASH="${QASR_FLASH:-auto}"      # auto/on/off: Flash Attention (Metal 长 ctx �
 MLOCK="${QASR_MLOCK:-0}"         # 1 = --load-mode mlock: 模型页常驻防换出(略增常驻内存)
 TEMP="${QASR_TEMP:-0}"           # 采样温度: 0=贪心确定性 (llama.cpp 默认0.8会导致每次结果抖动)
 TIMEOUT="${QASR_TIMEOUT:-120}"
+# 段尾去标点: 1(默认)=删掉每段 ASR 因停顿在末尾补的句末标点, 由下游大模型决定
+# 最终标点; 0=保留引擎原样末尾标点(旧行为)。只动整段最后一个标点, 段内标点/
+# 换行/逗号一律保留。
+STRIP_TRAILING_PUNCT="${QASR_STRIP_TRAILING_PUNCT:-1}"
+# 重复惩罚: llama.cpp 默认 1.0(关闭), 贪心(temp=0)下音频模型在停顿/静音边界
+# 容易复读同一短语(如"再来看一再来看一下")。1.1 轻度惩罚可打断复读, 又不至于
+# 误伤正常重复; 想彻底关闭设 1.0。
+REPEAT_PENALTY="${QASR_REPEAT_PENALTY:-1.1}"
+# 诊断日志: 1(默认)=每次请求把引擎 raw 原文和整理后文本打到 server.log, 用于判断
+# 重复到底来自引擎还是调用方拼接; 0=关闭。
+LOG_RAW="${QASR_LOG_RAW:-1}"
 # 转写提示词(精简优化版): 已去掉"删口头语/加标点/数字转阿拉伯"话术(标点由模型
 # 自然输出、口头语与数字规范化已在 rule 档/ITN 确定性完成), 保留语言约束/纠错/
 # 专名准确, 并含指令词逻辑: 听到 发送 / clear 指令词时单独成句并触发断句。
@@ -53,6 +67,22 @@ case "$ORGANIZER" in
   none|rule) ;;
   *) echo "错误: QASR_ORGANIZER 只支持 none|rule, 得到: $ORGANIZER" >&2; exit 1 ;;
 esac
+
+case "$STRIP_TRAILING_PUNCT" in
+  1) PUNCT_FLAG="--strip-trailing-punct" ;;
+  0) PUNCT_FLAG="--no-strip-trailing-punct" ;;
+  *) echo "错误: QASR_STRIP_TRAILING_PUNCT 只支持 0|1, 得到: $STRIP_TRAILING_PUNCT" >&2; exit 1 ;;
+esac
+
+case "$LOG_RAW" in
+  1) LOG_RAW_FLAG="--log-raw" ;;
+  0) LOG_RAW_FLAG="--no-log-raw" ;;
+  *) echo "错误: QASR_LOG_RAW 只支持 0|1, 得到: $LOG_RAW" >&2; exit 1 ;;
+esac
+
+if [[ ! "$REPEAT_PENALTY" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "错误: QASR_REPEAT_PENALTY 需为数字(>=1.0), 得到: $REPEAT_PENALTY" >&2; exit 1
+fi
 
 for f in "$ENGINE" "$MODEL" "$MMPROJ"; do
   [ -f "$f" ] || { echo "错误: 缺少文件 $f
@@ -80,10 +110,15 @@ trap cleanup EXIT
 echo "启动 Qwen3-ASR-1.7B 服务 ..."
 echo "  时间   : $START_AT"
 echo "  engine : llama-server(Metal) :$ENGINE_PORT  ngl=$NGL  ctx=$CTX  parallel=$PARALLEL"
-echo "  tune   : threads=${THREADS:-(auto)}  flash=$FLASH  mlock=$MLOCK  temp=$TEMP"
+echo "  tune   : threads=${THREADS:-(auto)}  flash=$FLASH  mlock=$MLOCK  temp=$TEMP  repeat_penalty=$REPEAT_PENALTY"
 echo "  model  : $MODEL"
 echo "  mmproj : $MMPROJ"
-echo "  service: http://$HOST:$SERVICE_PORT  organizer=$ORGANIZER"
+echo "  service: http://$HOST:$SERVICE_PORT  organizer=$ORGANIZER  log_raw=$LOG_RAW"
+if [ "$STRIP_TRAILING_PUNCT" = "1" ]; then
+  echo "  punct  : 段尾去标点=开 (末尾标点交给下游大模型)"
+else
+  echo "  punct  : 段尾去标点=关 (保留引擎末尾标点)"
+fi
 if [ -n "$PROMPT" ]; then
   echo "  prompt : $PROMPT"
 else
@@ -98,6 +133,7 @@ ENGINE_ARGS=(
   -c "$CTX"
   -np "$PARALLEL"
   -ngl "$NGL"
+  --repeat-penalty "$REPEAT_PENALTY"
   --host "$HOST" --port "$ENGINE_PORT"
 )
 [ -n "$THREADS" ] && ENGINE_ARGS+=(-t "$THREADS")
@@ -122,6 +158,8 @@ python3 "$SCRIPT_DIR/server/qwen3_asr_server.py" \
   --organizer "$ORGANIZER" \
   --prompt "$PROMPT" \
   --temperature "$TEMP" \
+  "$PUNCT_FLAG" \
+  "$LOG_RAW_FLAG" \
   --timeout "$TIMEOUT" \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 SERVICE_PID=$!

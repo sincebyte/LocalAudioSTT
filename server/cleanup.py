@@ -2,13 +2,16 @@
 
 Engine (llama.cpp Qwen3-ASR) returns raw transcripts, optionally with a
 language marker prefix (`language Chinese<asr_text>...`) and possible /sil
-placeholders. Everything downstream is deterministic, model-free cleanup:
+placeholders. Everything downstream is deterministic, model-free cleanup; line
+breaks are passed through untouched - paragraph layout is left to the caller
+(or a downstream LLM):
 
   - strip_markers  - drop the leading `language ...<asr_text>` marker
   - strip_sil      - drop /sil noise placeholders (defensive)
-  - organize_by_rule - line-initial 第X点 / 一、 -> "N. " numbered lines
+  - filter_fillers - remove spoken filler words (嗯/呃/那个/就是说...)
   - normalize_chinese_digits - Chinese numerals -> Arabic (ITN-lite, cn2an)
   - normalize_commands - 发送/clear 指令词字典映射(误识 -> 精确指令)
+  - strip_trailing_punctuation - drop the sentence-ender ASR put at the very end
   - finalize_transcription - the whole per-utterance pipeline used by the server
 
 General vocabulary (org/emacs/funasr...) is intentionally NOT mapped - only the
@@ -90,111 +93,61 @@ def is_prompt_echo(text: str, prompt: str) -> bool:
     return run >= _ECHO_MIN_RUN and run >= _ECHO_MIN_COVERAGE * len(text_compact)
 
 
-# Line-initial Chinese ordinals turned into numbered lines (rule organizer).
-_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-              "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-_HEAD_CN_ORDINAL_RE = re.compile(r"^第\s*([一二三四五六七八九十]|[0-9]+)\s*[点条项部分]")
-_HEAD_CN_PUNCT_RE = re.compile(r"^([一二三四五六七八九十])\s*[、.．]")
-
-
-def _to_arabic(num: str) -> str:
-    if num.isdigit():
-        return str(int(num))
-    if num in _CN_DIGITS:
-        return str(_CN_DIGITS[num])
-    return num
-
-
-# The engine starts a new line at every pause, so one spoken sentence can be
-# split across several lines. Only line-initial enumeration markers are real
-# line starts; every other line is a continuation and is joined back, keeping
-# an utterance as one paragraph while numbered lists still survive.
-_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
-_CJK_PUNCT = set("，。！？；：、…（）【】「」《》〈〉“”‘’—～·")
-_NO_SPACE_AFTER = "([{"
-_NO_SPACE_BEFORE = ")]}%,.;:!?"
-
-
-def _needs_space(left: str, right: str) -> bool:
-    """Whether joining `left` + `right` needs a separating space.
-
-    Mixed CJK/ASCII text reads naturally with a space at the seam (用 API
-    做转写); two Han characters are glued directly, and CJK punctuation never
-    takes a space.
-    """
-    if not left or not right:
-        return False
-    a, b = left[-1], right[0]
-    if a.isspace() or b.isspace():
-        return False
-    if a in _CJK_PUNCT or b in _CJK_PUNCT:
-        return False
-    a_han = bool(_HAN_RE.match(a))
-    b_han = bool(_HAN_RE.match(b))
-    if a_han != b_han:
-        return True
-    if a_han and b_han:
-        return False
-    if a in _NO_SPACE_AFTER or b in _NO_SPACE_BEFORE:
-        return False
-    return True
-
-
-def organize_by_rule(text: str) -> str:
-    """Rewrite clean line-initial enumeration markers into numbered lines
-    (第X点/一、... -> "N. ...").
-
-    Pause-induced line breaks are dropped: a line that does not start a new
-    enumeration item is a wrapped continuation and is joined onto the previous
-    line, so an utterance comes back as one paragraph instead of one line per
-    breath."""
-    if not text.strip():
-        return text
-    lines_out: list[str] = []
-    for raw_line in text.split("\n"):
-        line = raw_line.strip()
-        if not line:
-            continue
-        numbered = False
-        match = _HEAD_CN_ORDINAL_RE.match(line)
-        if match:
-            head = _to_arabic(match.group(1))
-            line = f"{head}. {line[match.end():]}".rstrip()
-            numbered = True
-        else:
-            match = _HEAD_CN_PUNCT_RE.match(line)
-            if match:
-                head = _to_arabic(match.group(1))
-                line = f"{head}. {line[match.end():]}".rstrip()
-                numbered = True
-        if numbered or not lines_out:
-            lines_out.append(line)
-        elif _needs_space(lines_out[-1], line):
-            lines_out[-1] = f"{lines_out[-1]} {line}"
-        else:
-            lines_out[-1] = lines_out[-1] + line
-    return "\n".join(lines_out)
-
-
 def has_spoken_content(text: str) -> bool:
     """Whether `text` carries real speech (alphanumerics or CJK ideographs).
     Pure punctuation-only transcripts count as not spoken."""
     return any(ch.isalnum() for ch in text)
 
 
+# Sentence-enders the ASR model appends because the clip ended, not because the
+# speaker finished a sentence. Weak pauses are included too: a segment flushed
+# on a silence timeout may end with a comma the caller has no use for.
+_TRAILING_PUNCT = "。．.！!？?；;，,、：:…"
+# Closing quotes/brackets that may wrap the ender (「你好。」/ “你好。”). They are
+# not punctuation the ASR invented, so they stay; only the ender inside is cut.
+_TRAILING_CLOSERS = "”’\"'」』）)》】〕]})"
+
+
+def strip_trailing_punctuation(text: str) -> str:
+    """Drop the trailing sentence-ender the ASR added at the end of a segment.
+
+    Each request is flushed on a pause (silence timeout), so the punctuation the
+    model puts at the very end reflects that pause - not necessarily a real
+    sentence boundary. Removing it lets the downstream LLM decide the final
+    punctuation. Only the final run is touched; in-segment punctuation and all
+    line breaks stay exactly as transcribed. A wrapping closing quote/bracket is
+    preserved (「你好。」 -> 「你好」).
+    """
+    if not text:
+        return text
+    end = len(text)
+    while end > 0 and text[end - 1] in _TRAILING_CLOSERS:
+        end -= 1
+    start = end
+    while start > 0 and text[start - 1] in _TRAILING_PUNCT:
+        start -= 1
+    if start == end:
+        return text
+    return text[:start] + text[end:]
+
+
 def finalize_transcription(
-    raw: str, organizer: str = "rule", prompt: str = "", trailing: str = "\n\n"
+    raw: str,
+    organizer: str = "rule",
+    prompt: str = "",
+    strip_trailing_punct: bool = True,
 ) -> str:
     """Raw engine output -> text returned by /v1/audio/transcriptions.
 
     none - only marker/sil removal (keep raw words otherwise)
-    rule - marker/sil removal + spoken-filler cleanup + enumeration numbering
+    rule - marker/sil removal + spoken-filler cleanup
     `prompt` is the instruction bias (if any) sent to the engine; output that
-    merely echoes it is discarded rather than returned as speech.
-    `trailing` is appended to a non-empty result (default one blank line) so
-    callers that insert each transcript on its own get separate paragraphs; pass
-    "" when the caller concatenates segments (e.g. OpenChamber dictation joins
-    segments with a space, where a trailing newline would show as a line break).
+    merely echoes it is discarded rather than returned as speech. Line breaks
+    are left exactly as the engine produced them - paragraph layout is the
+    caller's (or a downstream LLM's) job, so none are added or merged here.
+    `strip_trailing_punct` (default on) drops the sentence-ender the ASR put at
+    the end of this pause-flushed segment, so the downstream LLM owns the final
+    punctuation. Set it off to return the engine's trailing mark verbatim.
     """
     if not raw:
         return ""
@@ -203,7 +156,6 @@ def finalize_transcription(
         return ""
     if organizer == "rule":
         text = filter_fillers(text)
-        text = organize_by_rule(text)
     # Deterministic Chinese-numeral -> Arabic (ITN-lite) on every organizer,
     # mirroring the old project: 三十五 -> 35, 百分之三十 -> 30%, 三点半 -> 3点半.
     # No-op when the optional cn2an package is not installed.
@@ -216,14 +168,16 @@ def finalize_transcription(
     text = normalize_commands(text)
     if not has_spoken_content(text):
         return ""
-    return text.rstrip("\n") + trailing
+    if strip_trailing_punct:
+        text = strip_trailing_punctuation(text)
+    return text
 
 
 __all__ = [
     "strip_markers",
     "strip_sil",
     "is_prompt_echo",
-    "organize_by_rule",
     "has_spoken_content",
+    "strip_trailing_punctuation",
     "finalize_transcription",
 ]
