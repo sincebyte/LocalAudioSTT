@@ -404,3 +404,108 @@ def test_transcription_endpoint_can_keep_trailing_punct():
         httpd.server_close()
         engine.shutdown()
         engine.server_close()
+
+
+# ---------------- streaming endpoint ----------------
+
+_MARKER = ["language", " Chinese", "<asr_text>"]
+
+
+class _FakeStreamEngineHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.server.last_body = self.rfile.read(length)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.end_headers()
+        for piece in self.server.pieces:
+            chunk = {"choices": [{"index": 0, "delta": {"content": piece}}]}
+            line = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+
+class _FakeStreamEngineServer(ThreadingHTTPServer):
+    def __init__(self, pieces):
+        super().__init__(("127.0.0.1", 0), _FakeStreamEngineHandler)
+        self.pieces = pieces
+        self.last_body = b""
+
+
+def _start_stream_engine(pieces):
+    engine = _FakeStreamEngineServer(pieces)
+    thread = threading.Thread(target=engine.serve_forever, daemon=True)
+    thread.start()
+    return engine
+
+
+def _post_stream_wav(port: int):
+    boundary = "----qwen3-test-boundary"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="s.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+        "RIFFfake\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/audio/transcriptions/stream",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    deltas = []
+    final = None
+    with urllib.request.urlopen(request, timeout=10) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line[6:])
+            if event.get("type") == "delta":
+                deltas.append(event["text"])
+            elif event.get("type") == "final":
+                final = event["text"]
+    return "".join(deltas), final
+
+
+def test_marker_stream_filter_handles_split_tag():
+    f = server.MarkerStreamFilter()
+    assert f.feed("language") == ""
+    assert f.feed(" Chinese") == ""
+    out = f.feed("<asr_text>你好") + f.feed("世界")
+    assert out == "你好世界"
+    assert f.flush() == ""
+
+
+def test_marker_stream_filter_passes_text_without_marker():
+    f = server.MarkerStreamFilter()
+    assert f.feed("没有") == ""
+    assert f.feed("标记") == ""
+    assert f.flush() == "没有标记"
+
+
+def test_stream_endpoint_emits_deltas_then_cleaned_final():
+    pieces = _MARKER + ["嗯，", "第一点买牛奶", "。"]
+    engine = _start_stream_engine(pieces)
+    cfg = server.ServerConfig(engine_url=f"http://127.0.0.1:{engine.server_port}/v1")
+    httpd = server.create_server("127.0.0.1", 0, cfg)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        deltas, final = _post_stream_wav(httpd.server_port)
+        # Deltas are the raw decode (marker removed) for live display...
+        assert deltas == "嗯，第一点买牛奶。"
+        # ...while final is the cleaned text the caller keeps.
+        assert final == "第一点买牛奶"
+        payload = json.loads(engine.last_body.decode("utf-8"))
+        assert payload["stream"] is True
+        assert payload["messages"][0]["content"][0]["type"] == "input_audio"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        engine.shutdown()
+        engine.server_close()

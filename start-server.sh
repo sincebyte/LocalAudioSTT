@@ -41,6 +41,12 @@ PARALLEL="${QASR_PARALLEL:-2}"
 THREADS="${QASR_THREADS:-}"      # e.g. 8: 显式限制 CPU 生成/批处理线程
 FLASH="${QASR_FLASH:-auto}"      # auto/on/off: Flash Attention (Metal 长 ctx 更省更稳)
 MLOCK="${QASR_MLOCK:-0}"         # 1 = --load-mode mlock: 模型页常驻防换出(略增常驻内存)
+# Prompt cache: 服务端在每次任务结束时把 slot 的 KV 状态序列化进 RAM, 供下次复用。
+# 上游默认 8192 MiB —— 但语音识别每次音频内容都不同, 命中率≈0, 等于白白常驻 8G。
+# 0=关闭(本场景推荐), 正数=上限 MiB, -1=无上限。
+CACHE_RAM="${QASR_CACHE_RAM:-0}"
+# 1=每次新任务额外把空闲 slot 也存进 prompt cache(上游默认开启); 本场景无复用价值, 默认关。
+CACHE_IDLE_SLOTS="${QASR_CACHE_IDLE_SLOTS:-0}"
 TEMP="${QASR_TEMP:-0}"           # 采样温度: 0=贪心确定性 (llama.cpp 默认0.8会导致每次结果抖动)
 TIMEOUT="${QASR_TIMEOUT:-120}"
 # 段尾去标点: 1(默认)=删掉每段 ASR 因停顿在末尾补的句末标点, 由下游大模型决定
@@ -60,6 +66,10 @@ LOG_RAW="${QASR_LOG_RAW:-1}"
 # 置空 QASR_PROMPT='' 则用引擎内置默认 ASR 提示。
 PROMPT="${QASR_PROMPT:-语音转写：说话人只说中文和英文，以中文为主。结合上下文纠正同音错别字，人名、地名尽量准确。注意：若听到指令词“发送”或“clear”，把它作为独立的指令单独成句，并在指令词处触发断句。}"
 LOG_FILE="${QASR_LOG_FILE:-$SCRIPT_DIR/server.log}"
+# Python 解释器: 默认取 PATH 里的 python3 (服务只依赖标准库, 3.9+ 均可);
+# 用 QASR_PYTHON=/path/to/python3 可固定版本(如 pyenv 的 3.14)。
+# 脱离器与 Python 服务都用它, 避免二者解析到不同解释器。
+PYTHON="${QASR_PYTHON:-$(command -v python3 || true)}"
 # 启动时间, 统一按中国标准时间 (UTC+8) 打印/落盘
 START_AT="$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S %Z')"
 
@@ -90,6 +100,16 @@ for f in "$ENGINE" "$MODEL" "$MMPROJ"; do
    - 再运行 ./download-models.sh (下载 Qwen3-ASR-1.7B GGUF)" >&2; exit 1; }
 done
 
+[ -n "$PYTHON" ] && [ -x "$PYTHON" ] || { echo "错误: 找不到 python3, 请安装或用 QASR_PYTHON=/path/to/python3 指定" >&2; exit 1; }
+
+# 目录被移动/重命名后, 二进制里构建时写死的绝对 rpath 会失效, 启动时报
+# "Library not loaded: @rpath/libllama-server-impl.dylib"。这里先自检,
+# 一旦引擎跑不起来就调用 fix-rpaths.sh 把 rpath 改写成相对路径再试。
+if ! "$ENGINE" --version >/dev/null 2>&1 && [ -x "$SCRIPT_DIR/fix-rpaths.sh" ]; then
+  echo "检测到 llama-server 的库路径失效(项目目录已变更?), 正在修复 rpath ..."
+  "$SCRIPT_DIR/fix-rpaths.sh" >/dev/null
+fi
+
 # Kill anything already listening on the target ports, so the service starts fresh.
 for p in "$SERVICE_PORT" "$ENGINE_PORT"; do
   if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -107,9 +127,28 @@ PIDS=()
 cleanup() { for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
+# 让子进程彻底脱离当前终端会话, 这样关闭 IDE/终端时不会被内核的 SIGHUP 或
+# "杀进程组" 带走(这正是"IDE 一关服务就没了"的原因: &+disown 只从 bash 的
+# 任务表里摘掉, 并不改变会话/进程组/控制终端)。
+# macOS 没有 setsid 命令, 故用 python3: setsid(2) 新建会话 -> 忽略 SIGHUP ->
+# execvp 替换成目标程序(映像被替换, PID 不变), 所以 $! 就是真实服务 PID,
+# 便于健康检查/停止; 只忽略 SIGHUP, SIGTERM 仍生效, kill <pid> 照常能用。
+DETACH_PY='
+import os, sys, signal
+try:
+    os.setsid()
+except OSError:
+    pass
+try:
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+except (ValueError, OSError):
+    pass
+os.execvp(sys.argv[1], sys.argv[1:])
+'
+
 echo "启动 Qwen3-ASR-1.7B 服务 ..."
 echo "  时间   : $START_AT"
-echo "  engine : llama-server(Metal) :$ENGINE_PORT  ngl=$NGL  ctx=$CTX  parallel=$PARALLEL"
+echo "  engine : llama-server(Metal) :$ENGINE_PORT  ngl=$NGL  ctx=$CTX  parallel=$PARALLEL  cache-ram=${CACHE_RAM}M"
 echo "  tune   : threads=${THREADS:-(auto)}  flash=$FLASH  mlock=$MLOCK  temp=$TEMP  repeat_penalty=$REPEAT_PENALTY"
 echo "  model  : $MODEL"
 echo "  mmproj : $MMPROJ"
@@ -144,14 +183,22 @@ esac
 if [ "$MLOCK" = "1" ]; then
   ENGINE_ARGS+=(--load-mode mlock)
 fi
-"$ENGINE" "${ENGINE_ARGS[@]}" \
+# 关掉 / 限制 prompt cache, 否则服务端会按 -cram 默认值常驻 8G(见文件头部 CACHE_RAM 注释)。
+ENGINE_ARGS+=(-cram "$CACHE_RAM")
+if [ "$CACHE_IDLE_SLOTS" = "1" ]; then
+  ENGINE_ARGS+=(--cache-idle-slots)
+else
+  ENGINE_ARGS+=(--no-cache-idle-slots)
+fi
+# 用 python3 做 setsid+ignore-SIGHUP+execvp, 使引擎脱离当前终端会话
+# (execvp 保留 PID, $! 仍是引擎真实 PID)。
+"$PYTHON" -c "$DETACH_PY" "$ENGINE" "${ENGINE_ARGS[@]}" \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 ENGINE_PID=$!
 PIDS+=("$ENGINE_PID")
-disown "$ENGINE_PID" 2>/dev/null || true
 
 # 2) Python wrapper.
-python3 "$SCRIPT_DIR/server/qwen3_asr_server.py" \
+"$PYTHON" -c "$DETACH_PY" "$PYTHON" "$SCRIPT_DIR/server/qwen3_asr_server.py" \
   --host "$HOST" \
   --port "$SERVICE_PORT" \
   --engine-url "http://$HOST:$ENGINE_PORT/v1" \
@@ -164,7 +211,6 @@ python3 "$SCRIPT_DIR/server/qwen3_asr_server.py" \
   >> "$LOG_FILE" 2>&1 < /dev/null &
 SERVICE_PID=$!
 PIDS+=("$SERVICE_PID")
-disown "$SERVICE_PID" 2>/dev/null || true
 
 # Wait for both /health endpoints (up to ~60s: engine model load takes a while).
 UP=0

@@ -10,6 +10,7 @@ drop, empty-transcript gating) on top, so callers get clean text in one request
 with line breaks left as-is.
 
   POST /v1/audio/transcriptions   (multipart `file` wav; `model` optional)
+  POST /v1/audio/transcriptions/stream  (same request; SSE deltas + final text)
   GET  /health
 
 There is deliberately NO alias/dictionary rewriting and NO Chinese->Arabic
@@ -20,6 +21,7 @@ those mappings are unnecessary.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
@@ -109,6 +111,105 @@ def transcribe_via_engine(config: ServerConfig, audio_bytes: bytes, filename: st
     return text
 
 
+ASR_TEXT_TAG = "<asr_text>"
+# How long the marker filter buffers before assuming the engine emitted no
+# language marker at all. "language Chinese<asr_text>" is far shorter than this.
+_MARKER_HOLD_LIMIT = 64
+
+
+class MarkerStreamFilter:
+    """Incrementally drop Qwen3-ASR's `language ...<asr_text>` prefix.
+
+    The engine streams that prefix token by token (`language`, ` Chinese`,
+    `<asr_text>`), so a per-token strip is not enough: hold output until the tag
+    appears, then emit only what follows it. If no tag shows up within a short
+    prefix, pass everything through unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._done = False
+
+    def feed(self, delta: str) -> str:
+        if self._done:
+            return delta
+        self._buffer += delta
+        index = self._buffer.lower().find(ASR_TEXT_TAG)
+        if index >= 0:
+            out = self._buffer[index + len(ASR_TEXT_TAG):]
+            self._buffer = ""
+            self._done = True
+            return out
+        if len(self._buffer) >= _MARKER_HOLD_LIMIT:
+            out = self._buffer
+            self._buffer = ""
+            self._done = True
+            return out
+        return ""
+
+    def flush(self) -> str:
+        if self._done:
+            return ""
+        out = self._buffer
+        self._buffer = ""
+        self._done = True
+        return out
+
+
+def stream_raw_via_engine(config: ServerConfig, audio_bytes: bytes):
+    """Yield raw transcript tokens for one clip from llama-server's SSE.
+
+    `/v1/audio/transcriptions` returns one JSON body; `/v1/chat/completions`
+    streams the same ASR decode token by token (`stream: true`), which is what
+    the streaming endpoint forwards. The configured prompt travels as a text
+    part so hotword/context bias matches the non-streaming endpoint.
+    """
+    url = config.engine_url.rstrip("/") + "/chat/completions"
+    encoded = base64.b64encode(audio_bytes).decode("ascii")
+    content = []
+    if config.prompt:
+        content.append({"type": "text", "text": config.prompt})
+    content.append({
+        "type": "input_audio",
+        "input_audio": {"data": encoded, "format": "wav"},
+    })
+    payload = {
+        "model": config.engine_model,
+        "stream": True,
+        "temperature": config.temperature,
+        "messages": [{"role": "user", "content": content}],
+    }
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=config.timeout) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                    delta = event["choices"][0].get("delta", {}).get("content")
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue
+                if delta:
+                    yield delta
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"engine {url} -> HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"engine {url} failed: {exc}") from exc
+
+
 def _is_file_field(part) -> bool:
     disposition = part.get("Content-Disposition", "")
     return "form-data" in disposition and 'name="file"' in disposition
@@ -153,6 +254,21 @@ class Qwen3ASRHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_sse_headers(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        # Close-delimited body: no Content-Length, the stream ends with the connection.
+        self.close_connection = True
+
+    def _write_sse(self, payload: dict) -> None:
+        line = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+        self.wfile.write(line.encode("utf-8"))
+        self.wfile.flush()
+
     def do_GET(self) -> None:
         if urlparse(self.path).path == "/health":
             self._send_json(HTTPStatus.OK, _json_bytes({"status": "ok"}))
@@ -160,14 +276,25 @@ class Qwen3ASRHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not found"))
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/v1/audio/transcriptions":
-            self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not found"))
+        path = urlparse(self.path).path
+        if path == "/v1/audio/transcriptions":
+            self._handle_transcription()
             return
+        if path == "/v1/audio/transcriptions/stream":
+            self._handle_stream_transcription()
+            return
+        self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not found"))
 
+    def _read_audio_request(self) -> tuple[bytes, str]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("missing Content-Length")
+        content_type = self.headers.get("Content-Type", "")
+        return parse_multipart_file(content_type, self.rfile.read(length))
+
+    def _handle_transcription(self) -> None:
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            content_type = self.headers.get("Content-Type", "")
-            audio_bytes, filename = parse_multipart_file(content_type, self.rfile.read(length))
+            audio_bytes, filename = self._read_audio_request()
         except Exception as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, _error_payload(str(exc)))
             return
@@ -196,6 +323,53 @@ class Qwen3ASRHandler(BaseHTTPRequestHandler):
             print(f"[raw]   {filename}: {raw!r}", flush=True)
             print(f"[clean] {filename}: {text!r}", flush=True)
         self._send_json(HTTPStatus.OK, _json_bytes({"text": text}))
+
+    def _handle_stream_transcription(self) -> None:
+        """Per-chunk streaming: SSE deltas as the engine decodes, then `final`.
+
+        The caller sends one short audio chunk per request and keeps its own
+        order; the deltas are for live display, while `final` is the cleaned
+        text that should replace them (filler removal, numeral/command mapping,
+        trailing-punctuation policy).
+        """
+        try:
+            audio_bytes, filename = self._read_audio_request()
+        except Exception as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, _error_payload(str(exc)))
+            return
+
+        self._send_sse_headers()
+        raw_parts: list[str] = []
+        marker_filter = MarkerStreamFilter()
+        try:
+            for delta in stream_raw_via_engine(self.config, audio_bytes):
+                raw_parts.append(delta)
+                visible = marker_filter.feed(delta)
+                if visible:
+                    self._write_sse({"type": "delta", "text": visible})
+            tail = marker_filter.flush()
+            if tail:
+                self._write_sse({"type": "delta", "text": tail})
+            raw = "".join(raw_parts)
+            text = finalize_transcription(
+                raw,
+                organizer=self.config.organizer,
+                prompt=self.config.prompt,
+                strip_trailing_punct=self.config.strip_trailing_punct,
+            )
+            if self.config.log_raw:
+                print(f"[stream raw]   {filename}: {raw!r}", flush=True)
+                print(f"[stream clean] {filename}: {text!r}", flush=True)
+            self._write_sse({"type": "final", "text": text})
+            self._write_sse({"type": "done"})
+        except (BrokenPipeError, ConnectionResetError):
+            # Client cancelled (stop/clear): nothing left to report.
+            return
+        except Exception as exc:
+            try:
+                self._write_sse({"type": "error", "message": str(exc)})
+            except Exception:
+                pass
 
 
 class Qwen3ASRHTTPServer(ThreadingHTTPServer):

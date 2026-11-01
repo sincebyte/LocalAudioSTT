@@ -32,6 +32,7 @@ echo "==> 2/3 配置编译 (GGML_METAL=ON)"
 cmake -S "$SRC" -B "$BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_METAL=ON \
+  -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON \
   -DLLAMA_BUILD_SERVER=ON \
   -DLLAMA_BUILD_EXAMPLES=ON \
   -DLLAMA_BUILD_TESTS=OFF \
@@ -53,6 +54,9 @@ if [ "${1:-}" = "--install" ]; then
   cp "$BIN_SERVER" "$SCRIPT_DIR/bin/llama-server"
   cp "$BIN_QUANT" "$SCRIPT_DIR/bin/llama-quantize"
   echo "      已安装到 $SCRIPT_DIR/bin/"
+  # cmake 写入的是构建时的绝对 rpath, 目录一搬 dyld 就找不到 dylib;
+  # 统一改写成相对路径, 让 bin/ 与 .deps/ 可以随项目整体移动。
+  "$SCRIPT_DIR/fix-rpaths.sh"
 fi
 
 echo
